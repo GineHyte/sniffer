@@ -3,6 +3,7 @@ import {readFileSync,existsSync,writeFileSync} from 'node:fs';
 import {parseEnv} from 'node:util';
 import {verifySettlement} from './settlement.mjs';
 import {loadSokosumiRuntime} from './sokosumi-runtime.mjs';
+import {taskTarget,assertTaskTarget,verifyRuntimeTask} from './task-target.mjs';
 const MINUTE=60*1000;
 export const USDM='16a55b2a349361ff88c03788f93e1e966e5d689605d044fef722ddde0014df10745553444d';
 export function taskHash(text){return createHash('sha256').update(text,'utf8').digest('hex')}
@@ -29,12 +30,12 @@ export function isPaidReady(){
  const r=JSON.parse(readFileSync('docs/registration-state.json','utf8'));
  return r.status==='RegistrationConfirmed'||r.registrationState==='RegistrationConfirmed'||r.registration?.state==='RegistrationConfirmed';
 }
-export async function createPaidAdapter({save,answer,core:providedCore,mps:providedMps,registration:providedRegistration}){
+export async function createPaidAdapter({save,answer,core:providedCore,mps:providedMps,registration:providedRegistration,target=taskTarget()}){
  const registration=()=>providedRegistration??JSON.parse(readFileSync('docs/registration-state.json','utf8'));
  let core=providedCore;
  async function getCore(){
   if(!core){const {readRuntimeCredential,createCoworkerHttpClient}=await loadSokosumiRuntime();
-   core=createCoworkerHttpClient({apiKey:readRuntimeCredential(process.env.COWORKER_ID)});}
+   core=createCoworkerHttpClient({apiKey:readRuntimeCredential(target.coworkerId)});}
   return core;
  }
  async function mps(path,body){
@@ -48,6 +49,8 @@ export async function createPaidAdapter({save,answer,core:providedCore,mps:provi
  }
  async function persist(task,state,paid){const next={...state,paid};await save(task.id,next);return next;}
  return {async advance(task,state){
+  assertTaskTarget(task,target);
+  await verifyRuntimeTask(await getCore(),task.id,target);
   let p=state.paid??{};const r=registration();
   if(!p.stage){
    if(!state.input?.trim())throw new Error('Paid Task requires authoritative started input');
@@ -64,7 +67,7 @@ export async function createPaidAdapter({save,answer,core:providedCore,mps:provi
    const payload=purchasePayload(p.payment,p.nonce,r);
    if(Date.now()>=Number(p.payment.payByTime))throw new Error('Signed payment deadline expired');
    state=await persist(task,state,{...p,payload,stage:'purchase-pending'});
-   const response=await (await getCore()).post(`/v1/tasks/${encodeURIComponent(task.id)}/events`,{comment:'Payment requested: 1 test USDM.',masumiPayment:payload});
+   const response=await (await verifyRuntimeTask(await getCore(),task.id,target)).post(`/v1/tasks/${encodeURIComponent(task.id)}/events`,{comment:'Payment requested: 1 test USDM.',masumiPayment:payload});
    return persist(task,state,{...p,stage:'awaiting-escrow',eventId:response.data.id});
   }
   if(['awaiting-escrow','awaiting-result','awaiting-withdrawal'].includes(p.stage)){
@@ -81,7 +84,7 @@ export async function createPaidAdapter({save,answer,core:providedCore,mps:provi
     return persist(task,state,{...p,stage:'result-saved',result,resultHash:taskHash(result)});
    }
    if(p.stage==='awaiting-result'&&observed.resultHash===p.resultHash&&confirmedState(observed,'ResultSubmitted')&&observed.onChainState==='ResultSubmitted')return persist(task,state,{...p,stage:'complete-ready'});
-   if(p.stage==='awaiting-withdrawal'&&['Withdrawn','DisputedWithdrawn'].includes(observed.onChainState)){const evidence=await verifySettlement({core:await getCore(),taskId:task.id,payment:observed,sellerAddress:registration().registration?.SmartContractWallet?.walletAddress,unit:USDM});return persist(task,state,{...p,stage:evidence.verified?'settled':'awaiting-withdrawal',settlement:evidence});}
+   if(p.stage==='awaiting-withdrawal'&&['Withdrawn','DisputedWithdrawn'].includes(observed.onChainState)){const evidence=await verifySettlement({core:await verifyRuntimeTask(await getCore(),task.id,target),taskId:task.id,payment:observed,sellerAddress:registration().registration?.SmartContractWallet?.walletAddress,unit:USDM});return persist(task,state,{...p,stage:evidence.verified?'settled':'awaiting-withdrawal',settlement:evidence});}
    return state;
   }
   if(p.stage==='result-saved'){
@@ -92,7 +95,7 @@ export async function createPaidAdapter({save,answer,core:providedCore,mps:provi
   }
   if(p.stage==='complete-ready'){
    state=await persist(task,state,{...p,stage:'complete-pending'});
-   const response=await (await getCore()).post(`/v1/tasks/${encodeURIComponent(task.id)}/events`,{status:'COMPLETED',comment:p.result});
+   const response=await (await verifyRuntimeTask(await getCore(),task.id,target)).post(`/v1/tasks/${encodeURIComponent(task.id)}/events`,{status:'COMPLETED',comment:p.result});
    return persist(task,{...state,phase:'completed'},{...p,stage:'awaiting-withdrawal',completionEventId:response.data.id});
   }
   if(p.stage.endsWith('-pending'))throw new Error(`Uncertain ${p.stage}. Inspect prior operation before recovery; automatic retry disabled.`);
