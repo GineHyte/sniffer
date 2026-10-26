@@ -1,0 +1,10 @@
+.env
+.env.*
+!.env.example
+.local/
+node_modules/
+.eve/
+.workflow/
+.output/
+dist/
+docs/*.json

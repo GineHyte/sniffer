@@ -1,0 +1,20 @@
+{
+  "name": "hackathon-team-name-finder",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "start": "node --env-file-if-exists=.env start.mjs",
+    "worker": "node --env-file-if-exists=.env worker.mjs",
+    "api": "node --env-file-if-exists=.env --env-file-if-exists=.local/mps-runtime.env agent-api.mjs",
+    "test": "node --env-file-if-exists=.env --test *.test.mjs"
+  },
+  "dependencies": {
+    "eve": "0.71.0",
+    "ai": "7.0.127",
+    "zod": "4.6.5",
+    "@ai-sdk/openai-compatible": "3.0.62"
+  }
+}
