@@ -1,11 +1,14 @@
 import {execFileSync} from 'node:child_process';
-import {dirname,join,isAbsolute} from 'node:path';
+import {join,posix,win32} from 'node:path';
 import {pathToFileURL} from 'node:url';
 let loaded;
-export function sokosumiRoot(run=execFileSync){
- const skillsPath=run('sokosumi',['skills','path'],{encoding:'utf8',timeout:30000}).trim();
- if(!isAbsolute(skillsPath)||!skillsPath.endsWith('/skills'))throw new Error('sokosumi skills path returned an invalid package path');
- return join(dirname(skillsPath),'dist','src');
+export function sokosumiRoot(run=execFileSync,platform=process.platform){
+ const windows=platform==='win32',path=windows?win32:posix,options={encoding:'utf8',timeout:30000};
+ // Windows installs the CLI as a .cmd shim, which only a shell can start. The command is a fixed string.
+ const output=windows?run('sokosumi skills path',[],{...options,shell:true}):run('sokosumi',['skills','path'],options);
+ const skillsPath=output.trim().replace(windows?/[\\/]+$/:/\/+$/,'');
+ if(!path.isAbsolute(skillsPath)||path.basename(skillsPath)!=='skills')throw new Error('sokosumi skills path returned an invalid package path');
+ return path.join(path.dirname(skillsPath),'dist','src');
 }
 export async function loadSokosumiRuntime(){
  if(!loaded){const root=sokosumiRoot();

@@ -9,9 +9,9 @@ test('Eve rejects a mismatched port or exposed listener',()=>{
  assert.deepEqual(eveAddress({EVE_URL:'http://127.0.0.1:21949'}),{port:21949,url:'http://127.0.0.1:21949'});
 });
 test('Eve executable resolves through Node package lookup',()=>{
- assert.match(eveBinary(),/node_modules\/eve\/bin\/eve\.js$/);
+ assert.match(eveBinary(),/node_modules[\\/]eve[\\/]bin[\\/]eve\.js$/);
 });
 test('runtime root derives from supported installed CLI output',()=>{
- assert.equal(sokosumiRoot((command,args)=>{assert.equal(command,'sokosumi');assert.deepEqual(args,['skills','path']);return '/opt/node/lib/node_modules/@masumi_network/sokosumi/skills\n';}),'/opt/node/lib/node_modules/@masumi_network/sokosumi/dist/src');
- assert.throws(()=>sokosumiRoot(()=>'/unrelated'),/invalid package path/);
+ assert.equal(sokosumiRoot((command,args)=>{assert.equal(command,'sokosumi');assert.deepEqual(args,['skills','path']);return '/opt/node/lib/node_modules/@masumi_network/sokosumi/skills\n';},'linux'),'/opt/node/lib/node_modules/@masumi_network/sokosumi/dist/src');
+ assert.throws(()=>sokosumiRoot(()=>'/unrelated','linux'),/invalid package path/);
 });
