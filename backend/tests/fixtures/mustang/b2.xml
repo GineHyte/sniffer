@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<validation filename="v-iban58.xml" datetime="2026-10-30 22:58:07">
+  <xml>
+    <info>
+      <version>2</version>
+      <profile>urn:cen.eu:en16931:2017#compliant#urn:xeinkauf.de:kosit:xrechnung_3.0</profile>
+      <validator version="2.26.0"/>
+      <rules>
+        <fired>16</fired>
+        <failed>1</failed>
+      </rules>
+      <duration unit="ms">806</duration>
+    </info>
+    <messages>
+      <warning type="27" location="/rsm:CrossIndustryInvoice/rsm:SupplyChainTradeTransaction[1]/ram:ApplicableHeaderTradeSettlement[1]/ram:SpecifiedTradeSettlementPaymentMeans[1]" criterion="not(normalize-space(ram:TypeCode) = '58') or matches(normalize-space(replace(ram:PayeePartyCreditorFinancialAccount/ram:IBANID, '([ \n\r\t\s])', '')), '^[A-Z]2[0-9]2[a-zA-Z0-9]0 30$') and xs:integer(string-join(for $cp in string-to-codepoints(concat(substring(normalize-space(replace(ram:PayeePartyCreditorFinancialAccount/ram:IBANID, '([ \n\r\t\s])', '')),5),upper-case(substring(normalize-space(replace(ram:PayeePartyCreditorFinancialAccount/ram:IBANID, '([ \n\r\t\s])', '')),1,2)),substring(normalize-space(replace(ram:PayeePartyCreditorFinancialAccount/ram:IBANID, '([ \n\r\t\s])', '')),3,2))) return (if($cp &gt; 64) then string($cp - 55) else string($cp - 48)),'')) mod 97 = 1">[BR-DE-19] "Payment account identifier" (BT-84) soll eine korrekte IBAN enthalten, wenn in "Payment means type code" (BT-81) mit dem Code 58 SEPA als Zahlungsmittel gefordert wird. [ID BR-DE-19] from /xslt/XR_30/XRechnung-CII-validation.xslt)</warning> 
+    </messages>
+    <summary status="valid"/>
+  </xml>
+  <messages></messages>
+  <summary status="valid"/>
+</validation>
+

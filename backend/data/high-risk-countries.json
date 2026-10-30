@@ -1,0 +1,8 @@
+{
+  "as_of": "2026-06-19",
+  "sources": [
+    "FATF, High-Risk Jurisdictions subject to a Call for Action, 19.06.2026: KP, IR, MM",
+    "OFAC, Cuban Assets Control Regulations (31 CFR Part 515): CU"
+  ],
+  "countries": ["CU", "IR", "KP", "MM"]
+}

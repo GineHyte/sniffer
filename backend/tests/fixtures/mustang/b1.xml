@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<validation filename="clean-a-w1.xml" datetime="2026-10-30 22:57:55">
+  <xml>
+    <info>
+      <version>2</version>
+      <profile>urn:cen.eu:en16931:2017#compliant#urn:xeinkauf.de:kosit:xrechnung_3.0</profile>
+      <validator version="2.26.0"/>
+      <rules>
+        <fired>15</fired>
+        <failed>0</failed>
+      </rules>
+      <duration unit="ms">797</duration>
+    </info>
+    <summary status="valid"/>
+  </xml>
+  <summary status="valid"/>
+</validation>
+

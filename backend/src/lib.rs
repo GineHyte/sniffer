@@ -2,10 +2,10 @@
 //! Module slots are declared here up front so parallel work never edits the same file.
 
 pub mod address;
-pub mod hashing;
-pub mod normalize;
-pub mod store;
 pub mod config;
+pub mod hashing;
 pub mod mustang;
+pub mod normalize;
 pub mod parse;
 pub mod sources;
+pub mod store;
