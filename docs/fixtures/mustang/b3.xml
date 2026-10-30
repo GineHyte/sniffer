@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<validation filename="v-no-bt10.xml" datetime="2026-10-30 22:58:08">
+  <xml>
+    <info>
+      <version>2</version>
+      <profile>urn:cen.eu:en16931:2017#compliant#urn:xeinkauf.de:kosit:xrechnung_3.0</profile>
+      <validator version="2.26.0"/>
+      <rules>
+        <fired>15</fired>
+        <failed>1</failed>
+      </rules>
+      <duration unit="ms">820</duration>
+    </info>
+    <messages>
+      <error type="27" location="/rsm:CrossIndustryInvoice" criterion="rsm:SupplyChainTradeTransaction/ram:ApplicableHeaderTradeAgreement/ram:BuyerReference[boolean(normalize-space(.))]">[BR-DE-15] Das Element "Buyer reference" (BT-10) muss übermittelt werden. [ID BR-DE-15] from /xslt/XR_30/XRechnung-CII-validation.xslt)</error> 
+    </messages>
+    <summary status="invalid"/>
+  </xml>
+  <messages></messages>
+  <summary status="invalid"/>
+</validation>
+

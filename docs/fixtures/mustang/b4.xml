@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<validation filename="v-broken.xml" datetime="2026-10-30 22:58:09">
+  <messages>
+    <exception type="8">File does not look like PDF nor XML (contains neither %PDF nor &lt;?xml)</exception> 
+  </messages>
+  <summary status="invalid"/>
+</validation>
+
