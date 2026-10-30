@@ -3,12 +3,12 @@
 
 pub mod address;
 pub mod config;
+pub mod criteria;
 pub mod hashing;
+pub mod model;
 pub mod mustang;
 pub mod normalize;
 pub mod parse;
+pub mod scoring;
 pub mod sources;
 pub mod store;
-pub mod criteria;
-pub mod model;
-pub mod scoring;
