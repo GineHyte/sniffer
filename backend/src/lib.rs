@@ -9,3 +9,6 @@ pub mod normalize;
 pub mod parse;
 pub mod sources;
 pub mod store;
+pub mod criteria;
+pub mod model;
+pub mod scoring;
