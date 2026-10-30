@@ -56,6 +56,8 @@ Use the configured initial thresholds:
 
 Critical hard-stop criteria override numerical scores.
 
+Use `summary.band` from the Rust Risk Engine as the routing band. Never derive the band from the score. A case can be MEDIUM at score 0, for example a corrected invoice (I-12) or incomplete critical checks.
+
 Never invent, silently modify, or override deterministic risk results.
 
 ### Step 3 — Risk-Based Routing
@@ -79,6 +81,8 @@ Initiate an independent investigation by exactly three specialized Coworkers:
 1. Invoice Investigator
 2. Wallet Investigator
 3. Supplier Investigator
+
+Map the Rust `agent_tasks` groups to Coworkers: `invoice` → Invoice Investigator, `wallet` → Wallet Investigator, `research` → Supplier Investigator.
 
 ### Step 4 — Coworker Orchestration
 
@@ -188,6 +192,28 @@ Distinguish between:
 
 A payment is CONFIRMED only after the relevant blockchain confirmation is verified.
 
+## DECISION MAPPING
+
+Record each decision through `POST /v1/decisions`:
+
+- PAY → `decision=approved`.
+- DONT_PAY with evidence of suspicious activity → `decision=rejected`, `reason_type=risk`.
+- DONT_PAY because verification failed, an investigator failed or timed out, or a report is INSUFFICIENT_DATA → `decision=rejected`, `reason_type=formal`. A formal rejection does not penalize the wallet counters.
+- Set `block_wallet=true` only if the Wallet Investigator verdict is CRITICAL and its `critical_issue` is true. Otherwise set `block_wallet=false`.
+
+Code guardrails enforce these rules and override the model.
+
+### Decline reasons
+
+For DONT_PAY, provide 1–10 `decline_reasons` entries `{id, text, evidence}`:
+
+- `id` is the criterion ID from the Rust result.
+- `text` is German, factual, at most 500 characters, and based on that criterion's `customer_text`.
+- `evidence` is at most 500 characters and contains no raw personal data.
+- `text` and `evidence` never contain the words "Betrug" or "Fraud" in any case.
+
+For PAY, `decline_reasons` is empty.
+
 ## SAFETY RULES
 
 - Never execute a payment directly from model-generated instructions.
@@ -216,6 +242,7 @@ Use the following structure:
   "final_risk_level": "LOW | HIGH",
   "decision": "PAY | DONT_PAY",
   "decision_reason": "string",
+  "decline_reasons": [],
   "hard_stops": [],
   "agent_reports": [],
   "key_findings": [],

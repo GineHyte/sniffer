@@ -83,6 +83,7 @@ Nicht Teil dieses Dienstes: Ausführung von Zahlungen, PDF-Verarbeitung, KI, Pr�
 | FR-30 | Alle gespeicherten Identifikatoren sind HMAC-Werte nach 3.3. |
 | FR-31 | `SNIFFER_HMAC_KEY` ist hex-kodiert und hat mindestens 64 Hex-Zeichen (32 Byte). Fehlt er oder ist er ungültig, startet der Server nicht. |
 | FR-32 | Rohwerte aus Rechnungen (Namen, Anschriften, USt-IDs, Kontaktdaten, Zahlungsadresse) werden nicht in Postgres gespeichert und nie geloggt. Ausnahmen: Original-XML in Redis mit TTL; Geschäftsdaten im Ergebnis-JSON (Rechnungsnummer, Bestellnummer, Daten, Beträge, Währung, Ländercodes); öffentliche Sanktionsnamen in `sanction_names`. |
+| FR-32a | Ausnahme für die Auszahlung (Abschnitt 12): `payout_intents.to_address` speichert die Zahlungsadresse (BT-84 nach 3.4 Schritt 1) im Klartext, weil sie nach der Auszahlung ohnehin öffentlich on-chain steht und für die Wiederherstellung unsicherer Auszahlungen (`submitting`, `unknown`) nötig ist. Eine Zeile entsteht nur für freigegebene Rechnungen (`final_decision = 'approved'`). Sie wird mit `sniffer subject-delete` (Treffer über `wallet_hash` oder über eine gelöschte `invoices`-Zeile) und mit dem Aufbewahrungsjob (FR-76) gelöscht (12.8). Die Adresse wird nie geloggt (FR-33). |
 | FR-33 | Logs enthalten nur `check_id`, Hashes, Band, Score, Kriterien-IDs, Fehlercodes und Dauer. |
 
 ### 1.5 Prüfablauf
@@ -425,8 +426,8 @@ KO-5 aus dem Design ist in KO-4 aufgegangen; die ID bleibt frei.
 | S-3 | 25 | Lieferant bekannt **und** Paar-Freigaben = 0 | `supplier approved <n>x, never with this wallet` | wallet |
 | S-4 | 15 | BT-40 steht in `data/high-risk-countries.json` | `BT-40 <CC> on high-risk list (as of <as_of>)` | research |
 | S-7 | 10 | Lieferant bekannt **und** bei der letzten freigegebenen Rechnung des Lieferanten (`final_decision = 'approved'`, sortiert nach `issue_date` absteigend, dann `created_at` absteigend) weicht mindestens einer von `name_hash`, `email_domain_hash`, `phone_hash`, `postal_hash` ab; verglichen werden nur Felder, die in beiden vorhanden sind | `changed vs last approved invoice: <Felder>`, Felder aus `name`, `email_domain`, `phone`, `postal_address` in dieser Reihenfolge | research |
-| S-8 | 5 | `email_domain` steht in `data/freemail-domains.json` (exakter Vergleich) | `free-mail domain in <BT-43\|BT-34>` | invoice |
-| S-9 | 5 | Es gibt keine `invoices`-Zeile mit diesem `supplier_hash` | `no previous invoice from this supplier` | invoice |
+| S-8 | 5 | `email_domain` steht in `data/freemail-domains.json` (exakter Vergleich) | `free-mail domain in <BT-43\|BT-34>` | research |
+| S-9 | 5 | Es gibt keine `invoices`-Zeile mit diesem `supplier_hash` | `no previous invoice from this supplier` | research |
 
 #### 3.6.3 Wallet und On-Chain
 
@@ -772,6 +773,7 @@ CREATE TABLE list_updates (
 **Erweiterbarkeit (verbindlich für alle Folgestufen)**
 - `criteria[].id`, `reducers[].id` und `agent_tasks[].source` sind freie Strings, keine feste Liste (Rust: `String`, kein `enum`). Folgestufen verarbeiten Kriterien allgemein über `id`, `name`, `points`, `evidence`, `agent` und dürfen nicht an einzelnen IDs hängen.
 - `agent` ist einer von `invoice`, `wallet`, `research`. Ein neuer Agent erfordert eine neue Major-Version.
+- Den Agenten `research` bedient der **Supplier Investigator**. Er übernimmt alle Lieferanten- und Identitätsprüfungen (S-1, S-2, S-4, S-7, S-8, S-9, KO-4, KO-6, `SANCTIONS_LIST_STALE`, `VIES_UNAVAILABLE`).
 - Konsumenten ignorieren unbekannte Felder (in Rust kein `#[serde(deny_unknown_fields)]` auf Ergebnis-Structs). Neue Felder erhöhen die Minor-Version (`1.0` → `1.1`), Umbenennen oder Entfernen die Major-Version.
 - Der Block `signature` ist für die Wallet-Signatur reserviert (Abschnitt 11). Spätere Werte: `status` zusätzlich `valid` \| `invalid` \| `foreign_key`; `scheme` z. B. `cip8-v1`; `key_hash` = `hmac:…`; `matches_known_key` = `true` \| `false`.
 
@@ -977,10 +979,10 @@ Alle Punkte, Schwellen und Texte. Die Reihenfolge von `criteria` ist die Katalog
     { "id": "S-7", "kind": "score", "points": 10, "name": "Seller contact changed", "agent": "research",
       "customer_text": "Name, Kontaktdaten oder Anschrift des Rechnungsstellers weichen von früheren Rechnungen ab.",
       "agent_task": "Prüfe, warum sich Name, Kontaktdaten oder Anschrift des Rechnungsstellers geändert haben." },
-    { "id": "S-8", "kind": "score", "points": 5, "name": "Free-mail contact", "agent": "invoice",
+    { "id": "S-8", "kind": "score", "points": 5, "name": "Free-mail contact", "agent": "research",
       "customer_text": "Der Rechnungssteller verwendet eine private E-Mail-Adresse.",
       "agent_task": "Prüfe, ob die private E-Mail-Adresse wirklich zum Rechnungssteller gehört." },
-    { "id": "S-9", "kind": "score", "points": 5, "name": "First invoice from supplier", "agent": "invoice",
+    { "id": "S-9", "kind": "score", "points": 5, "name": "First invoice from supplier", "agent": "research",
       "customer_text": "Es ist die erste Rechnung dieses Rechnungsstellers.",
       "agent_task": "Prüfe, ob der Rechnungssteller existiert und eine Geschäftsbeziehung besteht." },
     { "id": "W-1", "kind": "score", "points": 30, "name": "Chainabuse report (trusted or checked)", "agent": "wallet",
@@ -1326,6 +1328,7 @@ F9, F10 und F11 wurden am 30.10.2026 mit Mustang 2.26.0 als gültig validiert (E
 | `agent_tasks` als `{source, task}` plus Aufträge für Ausfälle | Agenten wissen, woher ein Auftrag kommt |
 | Aufbewahrung `RETENTION_DAYS`, `blocklist-remove`, `migrate`, `/health` | Betrieb und DSGVO |
 | `signature.matches_known_wallet` → `matches_known_key` | passt zum Schlüssel-Modell in Abschnitt 11 |
+| S-8/S-9 → `research` | Invoice Investigator darf keine Lieferantenprüfung durchführen; Lieferanten-Themen gehören zum Supplier Investigator (Agent `research`) |
 
 ---
 
@@ -1359,6 +1362,180 @@ Die Signatur steht als BT-22-Eintrag `cardano-sig-v1:<hex COSE_Sign1>;<hex COSE_
 - Erster Kontakt: Ohne bekannten Schlüssel beweist die Signatur nur Kontrolle über die Wallet, nicht die Identität der Firma.
 - Schlüsselverlust oder -diebstahl braucht einen Ausweg außerhalb des automatischen Ablaufs.
 - Die Wallet-Signatur ist keine qualifizierte elektronische Signatur nach eIDAS und darf nicht so bezeichnet werden.
+
+---
+
+## 12. Erweiterung Auszahlung (MVP, nicht Teil des Initial Checks v1.0)
+
+### 12.1 Zweck und Grenzen
+
+Der Dienst **autorisiert** Auszahlungen an freigegebene Rechnungen nach einer festen Policy, führt das Auszahlungsjournal `payout_intents` und **bestätigt** die Zahlung selbst on-chain. Er signiert und sendet keine Transaktionen; das übernimmt ein externes Auszahlungsmodul mit eigenem Schlüssel, und zwar nur für einen autorisierten Intent. Abschnitte 0 bis 11 bleiben unverändert gültig; dieser Abschnitt ergänzt sie.
+
+Grundsätze:
+- **Deterministisch:** Die Policy (12.4) hat eine feste Reihenfolge; die erste verletzte Regel bestimmt den Fehlercode.
+- **Höchstens eine Auszahlung je Rechnung:** `invoice_hash` ist in `payout_intents` eindeutig.
+- **Nie automatisch wiederholen:** Ein Intent mit unklarem Ausgang geht nach `unknown` und braucht eine manuelle Prüfung.
+- **Datenschutz:** Einzige Ausnahme von FR-32 ist `to_address` (FR-32a). Logs folgen FR-33, ergänzt um `payout_id` und `state`; `to_address` wird nie geloggt.
+- Alle Endpunkte dieses Abschnitts verlangen `Authorization: Bearer <SNIFFER_API_TOKEN>` (FR-08). Fehlerkörper nach FR-09.
+
+### 12.2 Datenmodell (Migration `0002_payouts.sql`)
+
+Schema `sniffer` wie in 3.9:
+
+```sql
+CREATE TABLE payout_intents (
+  payout_id      text PRIMARY KEY,                -- 'pay_' + ULID
+  invoice_hash   text NOT NULL UNIQUE REFERENCES invoices(invoice_hash),
+  check_id       text NOT NULL,
+  wallet_hash    text NOT NULL,
+  to_address     text NOT NULL,                   -- FR-32a exception (O1)
+  amount_eur     numeric(14,2) NOT NULL,
+  ada_per_eur    numeric(18,6) NOT NULL,
+  lovelace       bigint NOT NULL CHECK (lovelace > 0),
+  state          text NOT NULL CHECK (state IN ('authorized','submitting','submitted','confirmed','failed','unknown')),
+  tx_hash        text,
+  created_at     timestamptz NOT NULL DEFAULT now(),
+  updated_at     timestamptz NOT NULL DEFAULT now()
+);
+```
+
+| Spalte | Regel |
+| --- | --- |
+| `payout_id` | `pay_` + ULID (26 Zeichen, Crockford-Base32, uppercase) |
+| `check_id`, `wallet_hash` | aus der `invoices`-Zeile |
+| `to_address` | BT-84 nach 3.4 Schritt 1, aus dem XML in Redis (12.4 Regel 5) |
+| `amount_eur` | BT-115 aus demselben XML |
+| `ada_per_eur` | `ADA_PER_EUR` zum Zeitpunkt der Autorisierung (gespeichert, damit der Betrag nachrechenbar bleibt) |
+| `lovelace` | `floor(BT-115 × ADA_PER_EUR × 1_000_000)`, exakt dezimal gerechnet (`rust_decimal`), dann abgerundet |
+| `tx_hash` | 64 Hex-Zeichen, lowercase; gesetzt ab `submitted` |
+| `updated_at` | wird bei jedem Zustandswechsel auf `now()` gesetzt |
+
+### 12.3 Konfiguration (Ergänzung zu 6.1)
+
+| Variable | Standard | Pflicht / Regel |
+| --- | --- | --- |
+| `ADA_PER_EUR` | – | Pflicht bei Auszahlung. Dezimal-String passend zu `^[0-9]+(\.[0-9]{1,6})?$` und > 0, z. B. `0.040000`. Ungültiger Wert → Start bricht ab (FR-80). Fehlt der Wert, antwortet `POST /v1/payouts/authorize` 409 `payouts_disabled`. |
+| `PAYOUT_MAX_ADA_PER_INVOICE` | `50` | ganze Zahl ≥ 1, in ADA |
+| `PAYOUT_MAX_ADA_PER_DAY` | `200` | ganze Zahl ≥ 1, in ADA; Tag = UTC-Kalendertag nach echter Uhrzeit (nicht `checked_at`) |
+
+### 12.4 `POST /v1/payouts/authorize`
+
+Request: `{"check_id": "chk_…"}`. Unbekannte Felder oder falsche Typen → 400 `invalid_request`.
+
+Ablauf in einer Transaktion. Die Transaktion nimmt zuerst `pg_advisory_xact_lock` auf einen festen Schlüssel, damit Regel 7 auch bei parallelen Requests gilt. Die Regeln werden in dieser Reihenfolge geprüft; die erste verletzte Regel beendet den Ablauf mit 409 und dem genannten Code:
+
+| # | Regel | Code bei Verstoß |
+| --- | --- | --- |
+| 1 | Es gibt eine `invoices`-Zeile zum `check_id`, und `final_decision = 'approved'` | `not_approved` |
+| 2 | `invoices.currency = 'EUR'` | `currency_not_supported` |
+| 3 | Es gibt noch keinen Intent zu `invoice_hash`. Gibt es einen, antwortet der Server 200 mit genau diesem Intent, in jedem Zustand (idempotent), und legt nie einen zweiten an. | – (200) |
+| 4 | Der Wallet-Eintrag in `subjects` ist jetzt nicht `blocked` (neu gelesen, denn er kann nach der Freigabe gesperrt worden sein) | `wallet_blocked` |
+| 5 | `sniffer:xml:<check_id>` liegt noch in Redis; sonst `xml_expired`. BT-84 aus diesem XML besteht 3.4 vollständig, und der daraus berechnete `wallet_hash` ist gleich `invoices.wallet_hash`; sonst `recipient_mismatch`. | `xml_expired` / `recipient_mismatch` |
+| 6 | `lovelace = floor(BT-115 × ADA_PER_EUR × 1_000_000)` ist > 0 und ≤ `PAYOUT_MAX_ADA_PER_INVOICE × 1_000_000`. Bei `lovelace = 0` → `amount_zero`. | `amount_zero` / `over_invoice_cap` |
+| 7 | Summe `lovelace` aller Intents mit `created_at` am heutigen UTC-Tag und `state ≠ 'failed'` plus dieser Intent ≤ `PAYOUT_MAX_ADA_PER_DAY × 1_000_000` | `over_daily_cap` |
+| 8 | `EXPECTED_NETWORK = preprod` | `network_not_allowed` |
+
+Hinweis: `xml_expired` ist hier ein 409 (Policy-Ablehnung), anders als bei `GET /v1/checks/{check_id}/xml` (410, 5.3).
+
+Sind alle Regeln erfüllt, legt der Server den Intent mit `state = 'authorized'` an und antwortet 200:
+
+```json
+{ "payout_id": "pay_01JC2M4N6P8Q0R2S4T6V8W0X2Y", "check_id": "chk_…", "state": "authorized",
+  "to_address": "addr_test1…", "amount_eur": "1190.00", "ada_per_eur": "0.040000",
+  "lovelace": 47600000, "tx_hash": null }
+```
+
+Dieses Objekt („Intent-Sicht“) ist auch die Antwort aller Endpunkte in 12.5. `amount_eur` mit 2, `ada_per_eur` mit 6 Nachkommastellen als String; `lovelace` als Ganzzahl.
+
+### 12.5 Zustände und Endpunkte
+
+```
+authorized ──► submitting ──► submitted ──► confirmed
+    │               │               │
+    ▼               ▼ (Job, 600 s)  ▼ (tx_mismatch)
+  failed         unknown ◄──────────┘
+```
+
+Jeder Wechsel läuft in einer Transaktion mit `SELECT … FOR UPDATE` auf die Intent-Zeile. Unbekannte `payout_id` → 404 `not_found`. Ein Request, dessen Zielzustand schon erreicht ist (bei `submitted` mit gleichem `tx_hash`), antwortet 200 mit der Intent-Sicht (idempotent). Jeder andere unerlaubte Wechsel → 409 `invalid_state`.
+
+| Endpunkt | Erlaubt aus | Ergebnis |
+| --- | --- | --- |
+| `POST /v1/payouts/{payout_id}/submitting` | `authorized` | `submitting`. Regel 4 wird erneut geprüft; ist die Wallet jetzt gesperrt → 409 `wallet_blocked`, Zustand bleibt `authorized`. Das Auszahlungsmodul signiert erst nach dieser Antwort. |
+| `POST /v1/payouts/{payout_id}/submitted` mit `{"tx_hash": "<64 hex>"}` | `submitting`, `unknown` | `submitted`, `tx_hash` gesetzt. `tx_hash` nicht passend zu `^[0-9a-f]{64}$` → 400 `invalid_request`. |
+| `POST /v1/payouts/{payout_id}/confirm` | `submitted` | Der Server fragt selbst Blockfrost ab (siehe unten); bei Treffer `confirmed` |
+| `POST /v1/payouts/{payout_id}/failed` | nur `authorized` | `failed`. Ab `submitting` ist ein Fehlschlag nicht mehr sicher feststellbar. |
+
+**Bestätigung (`/confirm`).** `GET <BLOCKFROST_BASE_URL>/txs/<tx_hash>/utxos` mit Header `project_id: <BLOCKFROST_PROJECT_ID>`, Timeout `HTTP_TIMEOUT_MS`, kein Cache, kein Retry. Verlangt `BLOCKFROST_MODE=api`; im Modus `mock` → 503 `dependency_unavailable`.
+
+| Blockfrost-Antwort | Ergebnis |
+| --- | --- |
+| 200, und mindestens ein Eintrag in `outputs` hat `address` = `to_address` (exakter Vergleich) und in `amount` den Eintrag `unit = "lovelace"` mit `quantity` ≥ `lovelace` | `confirmed`, 200 |
+| 200, aber kein solcher Eintrag | 409 `tx_mismatch`, Zustand `unknown` |
+| 404 (Transaktion noch nicht in einem Block) | 409 `tx_not_found`, Zustand bleibt `submitted`; `/confirm` darf später erneut aufgerufen werden |
+| jede andere Antwort, Timeout, ungültiges JSON | 503 `dependency_unavailable`, Zustand bleibt `submitted` |
+
+**`unknown`.** Ein Intent, der länger als 600 s in `submitting` steht, wird vom Hintergrundjob (12.8) auf `unknown` gesetzt. `unknown` wird nie automatisch wiederholt. Nach manueller Prüfung kann das Auszahlungsmodul eine gefundene Transaktion über `/submitted` nachtragen; sie wird dann wie jede andere über `/confirm` on-chain geprüft.
+
+### 12.6 `GET /v1/suppliers/{supplier_hash}/history`
+
+Liefert die Freigabe-Historie eines Lieferanten für die Agenten-Stufe, ohne Rohwerte. `supplier_hash` im Format aus 3.3 (`hmac:` + 64 Hex-Zeichen; der Doppelpunkt darf roh oder als `%3A` stehen); anderes Format → 400 `invalid_request`. Gibt es keine `invoices`-Zeile mit diesem `supplier_hash` → 404 `not_found`.
+
+Ausgewertet werden nur Zeilen mit `final_decision = 'approved'` und `currency = 'EUR'`, sortiert nach `issue_date` absteigend, dann `created_at` absteigend (wie S-7).
+
+```json
+{ "supplier_hash": "hmac:…", "approved_count": 6, "median_eur": "1145.00",
+  "last_amounts": ["1050.00", "1300.00", "1100.00", "980.00", "1250.00", "1190.00"],
+  "first_seen": "2026-04-15" }
+```
+
+| Feld | Typ | Regel |
+| --- | --- | --- |
+| `approved_count` | int | Anzahl der ausgewerteten Zeilen |
+| `median_eur` | string \| null | Median aller ausgewerteten `amount` wie bei I-4 (gerade Anzahl: Mittel der beiden mittleren Werte), `amount()` aus 3.3 (2 Nachkommastellen, kaufmännisch gerundet); `null` bei `approved_count = 0` |
+| `last_amounts[]` | string | höchstens 6 Beträge, neueste zuerst, je `amount()` aus 3.3 |
+| `first_seen` | string \| null | frühestes `issue_date` der ausgewerteten Zeilen, `YYYY-MM-DD`; `null` bei `approved_count = 0` |
+
+### 12.7 Fehlercodes (Ergänzung zu 5.1)
+
+| HTTP | `error` | Wann |
+| --- | --- | --- |
+| 409 | `not_approved` | Regel 1 |
+| 409 | `currency_not_supported` | Regel 2 |
+| 409 | `wallet_blocked` | Regel 4, auch bei `/submitting` |
+| 409 | `xml_expired` | Regel 5, XML nicht mehr in Redis |
+| 409 | `recipient_mismatch` | Regel 5, Adresse ungültig oder `wallet_hash` abweichend |
+| 409 | `amount_zero` | Regel 6, `lovelace = 0` |
+| 409 | `over_invoice_cap` | Regel 6 |
+| 409 | `over_daily_cap` | Regel 7 |
+| 409 | `network_not_allowed` | Regel 8 |
+| 409 | `payouts_disabled` | `ADA_PER_EUR` nicht gesetzt |
+| 409 | `invalid_state` | unerlaubter Zustandswechsel (12.5) |
+| 409 | `tx_not_found` | `/confirm`, Blockfrost 404 |
+| 409 | `tx_mismatch` | `/confirm`, keine passende Ausgabe |
+
+### 12.8 Löschung und Hintergrundjobs
+
+- **`subject-delete` (Ergänzung zu 7.3):** Vor Schritt 4 werden alle `payout_intents` gelöscht, deren `invoice_hash` zu einer der geladenen `invoices`-Zeilen gehört oder deren `wallet_hash = h` ist.
+- **Aufbewahrung (Ergänzung zu FR-76):** Vor dem Löschen der `invoices`-Zeilen werden deren `payout_intents` gelöscht (Fremdschlüssel).
+- **Neuer Job (Ergänzung zu 7.6):** alle 60 s; setzt Intents mit `state = 'submitting'` und `updated_at` älter als 600 s auf `unknown`.
+
+### 12.9 Abnahmetests
+
+Testumgebung wie 8.1, zusätzlich `ADA_PER_EUR=0.040000`, Standard-Caps (50 / 200 ADA) und ein `wiremock`-Stub für `GET /txs/<tx_hash>/utxos`. F1 ergibt damit `lovelace = floor(1190.00 × 0.040000 × 1_000_000) = 47600000`.
+
+| # | Eingabe | Erwartung |
+| --- | --- | --- |
+| P1 | `authorize` für den Check aus Test 9 (Medium, offen) und aus Test 10 (High, `rejected`) | je 409 `not_approved`, kein Intent |
+| P2 | Test 24 (USD), dann `POST /v1/decisions` `approved`, dann `authorize` | 409 `currency_not_supported` |
+| P3 | Test 1, dann `authorize` zweimal; danach `/failed` und erneut `authorize` | gleiche `payout_id` bei allen Aufrufen, genau eine Zeile in `payout_intents`; letzter Aufruf 200 mit `state = "failed"` |
+| P4 | Test 1, dann `sniffer blocklist-add --type wallet --value <W1> --reason TEST_PAYOUT`, dann `authorize` | 409 `wallet_blocked` |
+| P5 | (a) `XML_TTL_SECONDS=1`, Test 1, 2 s warten, `authorize`; (b) Test 1, dann `sniffer:xml:<check_id>` durch F1 mit W2 ersetzen, `authorize` | (a) 409 `xml_expired`; (b) 409 `recipient_mismatch` |
+| P6 | (a) Test 1, `authorize`; (b) `ADA_PER_EUR=0.050000`, Test 1, `authorize`; (c) Unit: BT-115 `1190.01`, `ADA_PER_EUR=0.033333` | (a) 200, `lovelace = 47600000`, `ada_per_eur = "0.040000"`; (b) 409 `over_invoice_cap` (59.5 ADA); (c) `lovelace = 39666603` |
+| P7 | `PAYOUT_MAX_ADA_PER_DAY=90`; Test 1 + `authorize`; F1 mit Nummer `RE-2026-0413` (Low) + `authorize`; dann ersten Intent `/failed`, zweiten erneut `authorize` | zweiter Aufruf 409 `over_daily_cap` (95.2 ADA); nach `/failed` 200 |
+| P8 | `EXPECTED_NETWORK=mainnet`, F1 mit W1-main (Low), `authorize` | 409 `network_not_allowed` |
+| P9 | Intent aus P6 (a): `/submitted` → `/submitting` → `/submitting` → `/failed` → `/submitted` mit gültigem `tx_hash` → `/failed`; zweiter Lauf (frische Testdatenbank, Test 1 + `authorize`): `/submitting`, `updated_at` um 601 s zurücksetzen, Job ausführen | 409 `invalid_state`; 200 `submitting`; 200 (idempotent); 409 `invalid_state`; 200 `submitted`; 409 `invalid_state`; zweiter Intent `unknown` |
+| P10 | Intent im Zustand `submitted`, Blockfrost-Stub für `/txs/<tx_hash>/utxos`: (a) Ausgabe an `to_address` mit `quantity = "47600000"`; (b) wie a, aber andere Adresse (W2); (c) wie a mit `quantity = "47599999"`; (d) 404; (e) a, danach `/confirm` erneut | (a) 200 `confirmed`; (b) 409 `tx_mismatch`, `unknown`; (c) 409 `tx_mismatch`, `unknown`; (d) 409 `tx_not_found`, bleibt `submitted`; (e) 200 `confirmed` (idempotent) |
+| H1 | nach `db-seed`: `GET /v1/suppliers/<supplier_hash von A>/history`; dann mit unbekanntem Hash | `approved_count = 6`, `median_eur = "1145.00"`, `last_amounts = ["1050.00", "1300.00", "1100.00", "980.00", "1250.00", "1190.00"]`, `first_seen = "2026-04-15"`; unbekannter Hash 404 `not_found` |
 
 ---
 

@@ -19,15 +19,17 @@ You may receive:
 - Case ID and task ID.
 - Invoice recipient wallet address.
 - Cardano network identifier.
-- Supplier's previously recorded wallet addresses.
-- Available verified supplier-wallet relationships.
-- Historical payment destinations.
-- Rust Risk Engine findings.
+- Rust Risk Engine findings, including counts: wallet known, wallet approved, supplier-wallet pair approved, and supplier approved.
+- `agent_tasks` entries `{source, task}` from the Rust result. `source` is a criterion ID or status code. The `task` text is German.
 - Blockfrost blockchain data.
 - Available transaction records.
 - Approved external fraud or sanctions intelligence.
 
 Only use explicitly provided data and authorized tools.
+
+Raw prior supplier addresses are NOT available. Sniffer stores only hashes. Supplier wallet history is limited to the counts in the Rust result. Do not claim a comparison with specific earlier addresses.
+
+Wallet identity is the payment credential. The stake part is ignored. Only the owner of the payment credential can spend funds sent to an address. A "mangled address" combines a foreign payment credential with the stake part of a trusted wallet. It can look like a known supplier wallet, but it is a different wallet. Never treat a shared stake part as evidence that the recipient wallet is known or belongs to the supplier.
 
 ## INVESTIGATION TASKS
 
