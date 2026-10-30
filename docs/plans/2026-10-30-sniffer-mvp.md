@@ -293,6 +293,20 @@ Returns `{approved_count, median_eur, last_amounts: [..6], first_seen}` from `in
 **Output:** `docs/x402-notes.md` with the pinned version, the facilitator URL, a minimal server and client snippet, and one measured Preprod payment (tx hash) between two fresh test wallets, made with user approval.
 **Gate:** if the spike fails, stop and ask the user (the fallback is Masumi MPS, already in the repo).
 
+**Spike result (31.10.2026, `docs/x402-notes.md`): conditional GO.**
+- Pin `@x402/cardano`, `@x402/core` and `@x402/fetch` at `2.28.0`. 2.29.0 is under 2 weeks old.
+- There is **no public Cardano facilitator**. Run the facilitator in-process with `@x402/core` + `@x402/cardano` + Blockfrost Preprod. It needs no wallet or funds.
+- Network `cardano:preprod`, asset `lovelace`, v2 field `amount`. The client signs with a BIP-39 mnemonic.
+- **Replay risk:** a payment is not bound to `resource`/taskId. The gate must keep a unique `txHash → taskId` journal, and grant access only after a confirmed settle.
+- Cardano runs the route handler before settlement, so `/pay` only records the request.
+- Payments from one wallet must be **sequential** (the reference signer uses the first UTXO as its nonce). Settlement takes about 20–75 s each.
+- Go conditions:
+  1. One measured Preprod payment between two fresh wallets, with user approval.
+  2. The cross-task replay test passes.
+
+### Eve multi-process risk (from Task 24)
+Eve 0.71.0 has no per-session system prompt, so each role (`AGENT_ROLE`) runs as its own Eve process. All processes share `<appRoot>/.eve/` workflow state. **Task 25 must verify that 2+ role processes run in parallel without interference.** If they interfere, give each role its own app root under `.local/eve-<role>/`.
+
 ### Task 22: `x402/` shared wrapper
 
 **Files:** Create `x402/gate.mjs`, `x402/pay.mjs`, `x402/gate.test.mjs`.
