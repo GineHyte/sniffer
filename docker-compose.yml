@@ -1,0 +1,53 @@
+# Local dev stack for the Sniffer MVP (docs/plans/2026-10-30-sniffer-mvp.md, Task 4).
+# Image tags are pinned exactly (docs/initial-check-spec.md §2).
+# POSTGRES_PASSWORD comes from .env (never committed); see .env.example.
+# Ports bind to 127.0.0.1 only.
+
+services:
+  postgres:
+    image: postgres:16.15
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-sniffer}
+      POSTGRES_DB: ${POSTGRES_DB:-sniffer}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set in .env}
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  redis:
+    image: redis:7.4.12
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:6379:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+
+  # sniffer: added in Task 18 (backend/Dockerfile).
+  # sniffer:
+  #   build: ./backend
+  #   env_file: .env
+  #   ports:
+  #     - "127.0.0.1:8080:8080"
+  #   depends_on:
+  #     postgres:
+  #       condition: service_healthy
+  #     redis:
+  #       condition: service_healthy
+
+volumes:
+  postgres-data:
+  redis-data:
