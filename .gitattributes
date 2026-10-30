@@ -1,0 +1,3 @@
+# LF everywhere: config_sha256 hashes criteria.json bytes, and fixtures must match the Mustang-validated originals.
+* text=auto eol=lf
+*.jar binary
