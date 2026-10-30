@@ -146,7 +146,7 @@ Sprache **Rust** (stable, Edition 2021). Ein Binary `sniffer` mit Unterbefehlen.
 | Bereich | Crate / Werkzeug | Verwendung |
 | --- | --- | --- |
 | Async / HTTP-Server | `tokio`, `axum` | Server, `DefaultBodyLimit`, Graceful Shutdown |
-| HTTP-Client | `reqwest` (Features `rustls-tls`, `json`) | Blockfrost, VIES, Chainabuse, OFAC; Redirects folgen (Standard) |
+| HTTP-Client | `reqwest` (Features `rustls`, `json`; bis 0.12 hieß das Feature `rustls-tls`) | Blockfrost, VIES, Chainabuse, OFAC; Redirects folgen (Standard) |
 | XML lesen | `roxmltree` **0.21.2** | Rechnung und Mustang-Bericht; `ParsingOptions { allow_dtd: false, nodes_limit: 200000, .. }` |
 | OFAC-Liste | `quick-xml` | Streaming-Parser für SDN.XML |
 | Cardano-Adressen | `pallas-addresses` **1.4.0** | `Address::from_bech32`, `ShelleyAddress::{network, typeid, payment, to_bech32}`, `ShelleyPaymentPart::{is_script, to_hex}` |
@@ -155,7 +155,7 @@ Sprache **Rust** (stable, Edition 2021). Ein Binary `sniffer` mit Unterbefehlen.
 | Text | `unicode-normalization` **0.1.26** | NFKD, `char::is_combining_mark` |
 | Beträge | `rust_decimal` | exakte Dezimalrechnung, nie `f64` für Beträge |
 | Muster | `regex` | Regel-IDs, BT-82, Wertprüfungen |
-| Datenbank | `sqlx` (Features `postgres`, `runtime-tokio-rustls`, `migrate`, `chrono`, `rust_decimal`) | PostgreSQL 16, Migrationen in `migrations/` |
+| Datenbank | `sqlx` (Features `postgres`, `runtime-tokio`, `tls-rustls-aws-lc-rs`, `migrate`, `chrono`, `rust_decimal`, `macros`; nur ein Krypto-Backend aws-lc-rs wie reqwest) | PostgreSQL 16, Migrationen in `migrations/` |
 | Redis | `redis` (Feature `tokio-comp`) | Redis 7 |
 | JSON | `serde`, `serde_json` | Request- und Ergebnis-Structs |
 | Zeit / IDs | `chrono`, `ulid` | UTC-Zeiten, `check_id` |
