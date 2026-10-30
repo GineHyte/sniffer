@@ -1,0 +1,288 @@
+# SNIFFER — TECHNOLOGY STACK
+
+## 1. Frontend
+
+**Framework:** Next.js + React  
+Purpose: Build the main web application, including the dashboard, invoice management, risk analysis results, AI investigation visualization, and payment interface.
+
+**Programming Language:** TypeScript  
+Purpose: Ensure type-safe frontend development and communication with backend services.
+
+**Styling:** Tailwind CSS  
+Purpose: Build responsive layouts and a modern enterprise fintech interface.
+
+**UI Components:** shadcn/ui  
+Purpose: Create reusable tables, forms, buttons, dialogs, navigation elements, and dashboard components.
+
+**Agent Visualization:** React Flow  
+Purpose: Visualize interactions between the Main Sniffer Agent and the three specialized AI Coworkers.
+
+**API State Management:** TanStack Query  
+Purpose: Handle API requests, caching, and synchronization of server data.
+
+**Cardano Wallet Connection:** Mesh SDK + CIP-30  
+Purpose: Connect compatible Cardano wallets and request authorized transaction signatures.
+
+---
+
+## 2. Backend
+
+**Primary Programming Language:** Rust  
+Purpose: Implement core application logic, deterministic fraud detection, invoice processing, and payment security rules.
+
+**Web Framework:** Axum  
+Purpose: Build REST API endpoints connecting the frontend, AI agents, databases, and blockchain services.
+
+**Asynchronous Runtime:** Tokio  
+Purpose: Process concurrent requests and asynchronous operations.
+
+**Serialization:** Serde  
+Purpose: Convert structured data between Rust objects and JSON.
+
+**HTTP Client:** Reqwest  
+Purpose: Communicate with external APIs, AI services, and blockchain data providers.
+
+**Database Access:** SQLx  
+Purpose: Connect the Rust backend to PostgreSQL and manage database queries.
+
+**Financial Calculations:** rust_decimal  
+Purpose: Perform accurate monetary calculations without floating-point rounding errors.
+
+**API Documentation:** OpenAPI  
+Purpose: Define the interfaces and data structures used for communication between services.
+
+**Real-Time Updates:** Server-Sent Events (SSE)  
+Purpose: Stream invoice processing, AI investigation, and payment status updates to the frontend.
+
+---
+
+## 3. Invoice Processing and Fraud Detection
+
+**Invoice Validation:** Mustangproject + KoSIT Validator  
+Purpose: Validate supported German electronic invoice formats, including XRechnung and ZUGFeRD, according to applicable EN 16931 requirements.
+
+**Fraud Detection:** Custom Rust Risk Engine  
+Purpose: Perform deterministic fraud checks, evaluate predefined criteria, and calculate the initial invoice risk score.
+
+**Blockchain Analysis:** Blockfrost API  
+Purpose: Retrieve Cardano address information, UTXOs, transaction history, and available blockchain data.
+
+**External Verification:** Official registries and authorized REST APIs  
+Purpose: Access supplier verification services, sanctions lists, VAT information, and available fraud intelligence.
+
+---
+
+## 4. AI Agents and Orchestration
+
+**AI Runtime:** Node.js + TypeScript  
+Purpose: Execute the Main Sniffer Agent and the three specialized AI investigators.
+
+**AI Models:** Configurable LLM API  
+Purpose: Analyze suspicious information, interpret evidence, and generate structured investigation reports.
+
+**Main AI Agent:** Custom TypeScript Orchestrator  
+Purpose: Coordinate invoice processing, invoke the Rust Risk Engine, manage specialized investigations, and generate final risk recommendations.
+
+**Specialized AI Coworkers:**
+
+- Invoice Investigator — investigates financial inconsistencies, pricing anomalies, and unusual billing patterns.
+- Wallet Investigator — investigates Cardano wallet history, suspicious address activity, and payment destination changes.
+- Supplier Investigator — investigates supplier identity, company registration information, and credibility indicators.
+
+**Agent Network:** Sokosumi  
+Purpose: Register, discover, and coordinate specialized AI Coworkers.
+
+**Agent Communication:** Sokosumi MCP / APIs  
+Purpose: Discover agents, create investigation tasks, retrieve execution statuses, and collect results.
+
+**Structured AI Outputs:** JSON Schema + Zod  
+Purpose: Validate agent inputs and outputs and ensure consistent communication between agents.
+
+**Agent Integration:** REST API + JSON  
+Purpose: Connect the AI runtime with Rust backend services and external APIs.
+
+The three specialized investigators are invoked only when the deterministic Risk Engine classifies an invoice as MEDIUM risk.
+
+---
+
+## 5. Blockchain and Agent Payments
+
+**Blockchain Network:** Cardano  
+Purpose: Execute and verify blockchain transactions.
+
+**Development Network:** Cardano Preprod  
+Purpose: Test blockchain operations using test assets.
+
+**AI Service Payments:** x402  
+Purpose: Enable paid API requests for the Main Sniffer Agent and specialized AI Coworkers.
+
+**x402 Integration:** Cardano x402 SDK + compatible Facilitator  
+Purpose: Implement the payment verification and settlement process for AI services.
+
+**Agent Coordination:** Sokosumi  
+Purpose: Handle agent discovery and task management independently of payment settlement.
+
+**Blockchain Data Provider:** Blockfrost  
+Purpose: Verify relevant on-chain transactions and payment confirmations.
+
+Sokosumi and x402 are separate technologies. A custom integration layer connects paid API requests with Coworker task execution and results.
+
+---
+
+## 6. Supplier Payments — Cardano Card Integration
+
+**Reference Project:** Cardano Card  
+GitHub: https://github.com/masonarditi/cardanocard
+
+**Existing Cardano Card Technologies:**
+- Python
+- FastAPI
+- Masumi MIP-003
+- Masumi Escrow
+- Agentcard Purchase API
+- Cardano Preprod
+
+**Purpose in Sniffer:**
+
+Use Cardano Card as an architectural reference for reliable financial transaction processing.
+
+The existing Cardano Card project supports agent-assisted online purchases through a payment card. It does not provide a general-purpose cryptocurrency transfer function for arbitrary supplier wallets.
+
+Sniffer therefore needs an additional Cardano Transfer Module.
+
+**Payment Architecture Reference:** Cardano Card  
+Purpose: Adopt its transaction management principles, including idempotency, persistent payment states, transaction inspection, timeout handling, and recovery from uncertain payment outcomes.
+
+**Payment Integration Layer:** Custom Payment Adapter  
+Technology: TypeScript + REST API  
+Purpose: Connect the Rust Payment Policy Engine to the appropriate payment execution service.
+
+**Supplier Cryptocurrency Transfers:** Custom Cardano Transfer Module  
+Technology: TypeScript + Mesh SDK  
+Purpose: Construct, sign through authorized mechanisms, submit, and track ADA and supported Cardano native-token transfers to supplier wallets.
+
+**Payment Authorization:** Rust Payment Policy Engine  
+Purpose: Verify payment eligibility, recipient authorization, payment uniqueness, and spending restrictions before execution.
+
+**Transaction State Management:** PostgreSQL + Custom State Machine  
+Purpose: Persist payment intents, prevent duplicate transactions, track payment execution states, and reconcile uncertain outcomes.
+
+**Optional Smart Contracts:** Aiken  
+Purpose: Implement Cardano Vault rules for restricted spending and controlled transaction authorization.
+
+**Payment Verification:** Blockfrost API  
+Purpose: Verify transaction submission and blockchain confirmation.
+
+Important integration requirements:
+
+- Cardano Card is not a replacement for Mesh SDK.
+- Direct supplier cryptocurrency transfers must be implemented separately.
+- Cardano Card's payment-state architecture can serve as a reference for the custom transfer service.
+- Direct reuse or modification of Cardano Card source code requires appropriate permission because the repository does not currently specify a software license.
+- The original Cardano Card agent may optionally be integrated through Masumi MIP-003 for supported online retail purchases.
+- Supplier payments and x402 agent-service payments must remain separate financial processes.
+- AI agents must not have unrestricted access to wallet private keys.
+
+---
+
+## 7. Data Storage
+
+**Primary Database:** PostgreSQL  
+Purpose: Store invoices, supplier information, risk assessments, agent investigation results, payment records, and audit history.
+
+**Database Access and Migrations:** SQLx  
+Purpose: Connect the Rust backend to PostgreSQL and manage database schema changes.
+
+**Cache:** Redis  
+Purpose: Cache external API results, frequently requested information, and temporary processing states.
+
+**Payment Ledger:** PostgreSQL  
+Purpose: Maintain persistent transaction records, unique payment identifiers, execution states, and blockchain references.
+
+PostgreSQL is the source of truth for financial records. Redis is used only for caching and temporary processing data.
+
+---
+
+## 8. Infrastructure and Deployment
+
+**Containerization:** Docker  
+Purpose: Package application services into isolated containers.
+
+**Service Orchestration:** Docker Compose  
+Purpose: Run and connect frontend, backend, databases, and agent services.
+
+**API Infrastructure:** Cloudflare  
+Purpose: Provide HTTPS, traffic protection, and secure exposure of public endpoints.
+
+**Backend Hosting:** Container-compatible hosting environment  
+Purpose: Run Rust services, Node.js agent workers, payment services, and other long-running backend processes.
+
+**Application Logging:** Rust tracing  
+Purpose: Record processing events, technical errors, and backend activity.
+
+**Monitoring:** OpenTelemetry  
+Purpose: Monitor performance and trace requests across application services.
+
+**Secrets Management:** Environment Variables + Secure Secret Manager  
+Purpose: Protect API keys, credentials, wallet signing material, and integration secrets.
+
+---
+
+## 9. Technology Responsibilities
+
+The responsibilities of the main technologies are defined as follows:
+
+**Next.js + React + TypeScript**  
+User interface and frontend application.
+
+**Rust + Axum**  
+Core backend, invoice processing, deterministic risk analysis, and payment policy enforcement.
+
+**Node.js + TypeScript + LLM API**  
+Main Sniffer Agent, AI orchestration, and specialized investigations.
+
+**Sokosumi + MCP**  
+AI Coworker discovery, task coordination, and result retrieval.
+
+**x402 + Cardano**  
+Paid AI service requests and associated blockchain payments.
+
+**Cardano Card**  
+Reference architecture for reliable payment-state management, with optional separate retail purchasing integration.
+
+**Custom Payment Adapter + Mesh SDK**  
+Authorized supplier cryptocurrency transfers on Cardano.
+
+**Aiken**  
+Optional on-chain payment restrictions through custom smart contracts.
+
+**Blockfrost**  
+Cardano blockchain data access and transaction verification.
+
+**PostgreSQL**  
+Persistent application and financial data.
+
+**Redis**  
+Caching and temporary processing information.
+
+**Docker + Cloudflare**  
+Application deployment, service infrastructure, and public API protection.
+
+---
+
+## 10. Implementation Boundaries
+
+- The Rust Backend is responsible for deterministic checks and payment policy enforcement.
+- The Main Sniffer Agent coordinates AI investigations but cannot bypass deterministic security controls.
+- The three specialized AI Coworkers are invoked only for MEDIUM risk invoices.
+- Sokosumi coordinates agent execution, while x402 handles paid HTTP services.
+- Cardano Card is used as a payment architecture reference, not as an existing general-purpose cryptocurrency transfer library.
+- The Custom Cardano Transfer Module uses Mesh SDK to implement authorized supplier payments.
+- PostgreSQL stores financial transaction states and provides duplicate-payment protection.
+- Aiken is used only where custom on-chain spending restrictions are required.
+- Blockchain transactions must be verified before being marked as confirmed.
+- AI models must never directly control unrestricted private keys.
+
+This document defines the technology stack and the purpose of each technology.
+
+Detailed system architecture, functional requirements, risk-scoring rules, agent prompts, API contracts, and payment workflows are provided in separate specifications.
