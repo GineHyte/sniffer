@@ -5,3 +5,7 @@ pub mod address;
 pub mod hashing;
 pub mod normalize;
 pub mod store;
+pub mod config;
+pub mod mustang;
+pub mod parse;
+pub mod sources;
