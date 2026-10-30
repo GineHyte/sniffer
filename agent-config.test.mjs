@@ -1,17 +1,29 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
+import {readFileSync} from 'node:fs';
+import {registerHooks} from 'node:module';
+import {fileURLToPath} from 'node:url';
 
-async function configFor(contextWindowTokens) {
- const previous=process.env.ZAI_CONTEXT_WINDOW_TOKENS;
+// Eve compiles `?raw` asset imports to UTF-8 strings; mirror that so Node can load the instruction module.
+registerHooks({load(url,context,nextLoad){
+ if(!url.startsWith('file:')||new URL(url).search!=='?raw')return nextLoad(url,context);
+ const path=fileURLToPath(url.slice(0,url.indexOf('?')));
+ return {format:'module',shortCircuit:true,source:`export default ${JSON.stringify(readFileSync(path,'utf8'))};`};
+}});
+
+async function withEnv(values,load) {
+ const previous=Object.fromEntries(Object.keys(values).map(key=>[key,process.env[key]]));
+ const set=(key,value)=>{if(value===undefined)delete process.env[key];else process.env[key]=value;};
  try {
-  if(contextWindowTokens===undefined)delete process.env.ZAI_CONTEXT_WINDOW_TOKENS;
-  else process.env.ZAI_CONTEXT_WINDOW_TOKENS=contextWindowTokens;
-  return (await import(`./agent/agent.ts?test=${crypto.randomUUID()}`)).default;
+  for(const [key,value] of Object.entries(values))set(key,value);
+  return await load();
  } finally {
-  if(previous===undefined)delete process.env.ZAI_CONTEXT_WINDOW_TOKENS;
-  else process.env.ZAI_CONTEXT_WINDOW_TOKENS=previous;
+  for(const [key,value] of Object.entries(previous))set(key,value);
  }
 }
+const fresh=path=>import(`${path}?test=${crypto.randomUUID()}`);
+const configFor=(contextWindowTokens,...roleArg)=>withEnv({ZAI_CONTEXT_WINDOW_TOKENS:contextWindowTokens,AGENT_ROLE:roleArg.length?roleArg[0]:'invoice'},async()=>(await fresh('./agent/agent.ts')).default);
+const instructionsFor=role=>withEnv({AGENT_ROLE:role},async()=>(await fresh('./agent/instructions/role.ts')).default);
 
 test('custom model context window reaches Eve and rejects invalid token limits',async()=>{
  assert.equal((await configFor('32768')).modelContextWindowTokens,32768);
@@ -20,4 +32,32 @@ test('custom model context window reaches Eve and rejects invalid token limits',
  }
  assert.equal((await configFor('')).modelContextWindowTokens,undefined);
  assert.equal((await configFor(undefined)).modelContextWindowTokens,undefined);
+});
+
+test('each role maps to its prompt file',async()=>{
+ const {rolePromptFiles,resolveRole}=await import('./agent/lib/role.ts');
+ assert.deepEqual({...rolePromptFiles},{invoice:'invoice_investigator.txt',wallet:'wallet_investigator.txt',supplier:'supplier_investigator.txt',main:'main_agent_prompt.txt'});
+ assert.equal(resolveRole(' wallet '),'wallet');
+});
+
+test('each role loads its non-empty prompt as system instructions',async()=>{
+ const {rolePromptFiles}=await import('./agent/lib/role.ts');
+ for(const [role,file] of Object.entries(rolePromptFiles)) {
+  const instructions=await instructionsFor(role);
+  assert.ok(instructions.content.trim().length>0,role);
+  assert.equal(instructions.content,readFileSync(new URL(`./promts/${file}`,import.meta.url),'utf8'),role);
+  assert.notEqual(instructions.role,'user');
+  assert.ok((await configFor(undefined,role)).model,role);
+ }
+});
+
+test('missing or unknown AGENT_ROLE is rejected',async()=>{
+ for(const role of [undefined,'','  ']) {
+  await assert.rejects(configFor(undefined,role),/AGENT_ROLE is required/);
+  await assert.rejects(instructionsFor(role),/AGENT_ROLE is required/);
+ }
+ for(const role of ['bogus','Invoice','research','__proto__','toString']) {
+  await assert.rejects(configFor(undefined,role),/AGENT_ROLE must be one of invoice, wallet, supplier, main/);
+  await assert.rejects(instructionsFor(role),/AGENT_ROLE must be one of invoice, wallet, supplier, main/);
+ }
 });

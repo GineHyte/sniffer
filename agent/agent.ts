@@ -1,5 +1,7 @@
 import { defineAgent } from 'eve';
 import { createOpenAICompatible } from '@ai-sdk/openai-compatible';
+import { resolveRole } from './lib/role.ts';
+resolveRole(process.env.AGENT_ROLE);
 const provider = createOpenAICompatible({name:'zai',baseURL:process.env.ZAI_BASE_URL!,apiKey:process.env.ZAI_API_KEY!});
 const contextWindow = process.env.ZAI_CONTEXT_WINDOW_TOKENS?.trim();
 const modelContextWindowTokens = contextWindow ? Number(contextWindow) : undefined;
