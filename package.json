@@ -13,8 +13,10 @@
     "investigator:api": "node --env-file-if-exists=.env --env-file-if-exists=.local/live.env investigator/api.mjs",
     "investigator:worker": "node --env-file-if-exists=.env --env-file-if-exists=.local/live.env investigator/worker.mjs",
     "main": "node --env-file-if-exists=.env --env-file-if-exists=.local/live.env --env-file-if-exists=.local/sniffer-secrets.env main/api.mjs",
+    "demo": "node --env-file-if-exists=.env --env-file-if-exists=.local/live.env --env-file-if-exists=.local/sniffer-secrets.env scripts/demo-case.mjs",
+    "preflight": "node --env-file-if-exists=.env --env-file-if-exists=.local/live.env --env-file-if-exists=.local/sniffer-secrets.env scripts/preflight.mjs",
     "stack": "docker compose --env-file .env --env-file .local/live.env --env-file .local/sniffer-secrets.env up -d --build",
-    "test": "node --env-file-if-exists=.env --test *.test.mjs agents/*.test.mjs x402/*.test.mjs payout/*.test.mjs investigator/*.test.mjs main/*.test.mjs"
+    "test": "node --env-file-if-exists=.env --test *.test.mjs agents/*.test.mjs x402/*.test.mjs payout/*.test.mjs investigator/*.test.mjs main/*.test.mjs scripts/*.test.mjs"
   },
   "dependencies": {
     "@ai-sdk/anthropic": "4.0.71",

@@ -151,6 +151,40 @@ Never copy another project's wallet, registration, or task IDs.
 If a payment or registration write has an uncertain outcome, inspect its saved state before retrying.
 Complete a paid task and check the seller's net receipt before you submit payment evidence.
 
+## Run the Sniffer end-to-end test (Preprod)
+
+This runs one invoice through the whole pipeline: x402 intake payment, Initial Check, three paid investigators on Sokosumi, the Main decision and, if approved, a supplier payout. It spends test ADA only.
+
+1. Start the backend stack: `npm run stack`. Set `VIES_MODE=mock` in `.local/live.env`; the fixtures use made-up VAT IDs that real VIES rejects.
+2. Start one Eve runtime, one x402 API and one worker per investigator role, each in its own terminal (or in the background):
+
+   ```sh
+   npm run investigator:eve -- invoice    # also: wallet, supplier, main
+   npm run investigator:api -- invoice    # also: wallet, supplier
+   npm run investigator:worker -- invoice # also: wallet, supplier
+   ```
+
+3. Log in to the Sokosumi CLI (`sokosumi --preprod auth login`). Main creates the investigator tasks with this login.
+4. Check everything with the read-only preflight. Repeat until it prints `Preflight passed.`:
+
+   ```sh
+   npm run preflight
+   ```
+
+5. Start Main. It pays investigators and suppliers with real Preprod tADA, so it needs an explicit flag:
+
+   ```sh
+   npm run main -- --confirm-live-payments
+   ```
+
+6. In another terminal, submit the test invoice `docs/fixtures/f1.xml` as the customer and follow the case to its decision:
+
+   ```sh
+   npm run demo -- --confirm-live-payment
+   ```
+
+   Running it again with the same invoice only resumes polling. For a new case, pass `--invoice-number <new number>`. Use `npm run demo -- --case <case_id>` to follow an existing case without paying.
+
 ## Check your changes
 
 ```sh
