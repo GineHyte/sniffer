@@ -167,9 +167,11 @@ export function mocks({band='medium',result=checkResult(band),reports={},llm='PA
  const payOnce=async options=>{
   calls.payments.push(options);
   const role=ROLES.find(entry=>options.key.endsWith(`-${entry}`));
-  if(payFails[role]){
-   writeJsonAtomic(payJournalPath(options.journalDir,options.key),{key:options.key,phase:payFails[role]});
-   throw new Error(`payment ${payFails[role]}`);
+  // payFails[role]: a journal phase for every call, or an array consumed one call at a time (then the payment succeeds).
+  const phase=Array.isArray(payFails[role])?payFails[role].shift():payFails[role];
+  if(phase){
+   writeJsonAtomic(payJournalPath(options.journalDir,options.key),{key:options.key,phase});
+   throw new Error(`payment ${phase}`);
   }
   const journal={key:options.key,phase:'paid',paymentMade:true,txHash:String(calls.payments.length).padStart(64,'0')};
   writeJsonAtomic(payJournalPath(options.journalDir,options.key),journal);

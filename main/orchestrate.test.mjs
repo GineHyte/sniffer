@@ -335,6 +335,78 @@ test('a payment that failed before signing, or was proven unable to land, leaves
  });
 });
 
+const BLOCKFROST_PRE_SIGN='Failed to create payment payload: Failed to fetch protocol parameters: Blockfrost getProtocolParameters failed';
+const rolePayments=(m,role)=>m.calls.payments.filter(options=>options.key.endsWith(`-${role}`)).length;
+
+test('named bug (case-833a92c7…, 2026-10-31): a transient failure before signing is retried after 2 s and the investigator is paid',async()=>{
+ await withCase(async(store,caseId)=>{
+  const m=mocks({payFails:{invoice:['failed_before_signing']}});
+  const pay=m.payOnce;
+  m.payOnce=async options=>{try{return await pay(options);}catch{throw new Error(BLOCKFROST_PRE_SIGN);}};
+  const logs=[];
+  const d=deps(store,m,{log:line=>logs.push(line)});
+  const state=await runCase(caseId,d);
+  assert.equal(state.status,'completed',JSON.stringify(state.inspection));
+  assert.equal(rolePayments(m,'invoice'),2);
+  assert.equal(m.calls.payments.length,4);
+  assert.deepEqual(d.clock.delays,[2000]);
+  assert.deepEqual([state.steps.investigation.payments.invoice.phase,state.steps.investigation.payments.invoice.attempt],['paid',2]);
+  assert.ok(logs.some(line=>line.startsWith(`case=${caseId} event=investigator_payment_retry role=invoice attempt=2 delay_ms=2000 `)&&line.includes('getProtocolParameters')),logs.join('\n'));
+  assert.equal(m.calls.decisions[0].decision,'approved');
+  assert.equal(m.calls.payouts.length,1);
+ });
+});
+
+test('four failures before signing → 3 retries after 2 s, 5 s, 10 s, then unpaid → rejected/formal as before',async()=>{
+ await withCase(async(store,caseId)=>{
+  const m=mocks({payFails:{invoice:'failed_before_signing'}});
+  const logs=[];
+  const d=deps(store,m,{log:line=>logs.push(line)});
+  const state=await runCase(caseId,d);
+  assert.equal(rolePayments(m,'invoice'),4);
+  assert.deepEqual(d.clock.delays,[2000,5000,10000]);
+  assert.deepEqual(logs.filter(line=>line.includes('event=investigator_payment_retry')).map(line=>line.match(/attempt=(\d)/)[1]),['2','3','4']);
+  assert.deepEqual([state.steps.investigation.payments.invoice.phase,state.steps.investigation.payments.invoice.attempt],['failed',4]);
+  assert.equal(state.steps.investigation.reports.invoice.status,'unpaid');
+  assert.deepEqual([m.calls.decisions[0].decision,m.calls.decisions[0].reason_type],['rejected','formal']);
+  assert.equal(m.calls.payouts.length,0);
+ });
+});
+
+test('a signed, rejected, pending or unknown payment failure is never retried',async()=>{
+ for(const phase of ['rejected','unknown','pending','paid_unverified'])await withCase(async(store,caseId)=>{
+  const m=mocks({payFails:{invoice:[phase]}});
+  const logs=[];
+  const d=deps(store,m,{log:line=>logs.push(line)});
+  const state=await runCase(caseId,d);
+  assert.equal(rolePayments(m,'invoice'),1,phase);
+  assert.equal(d.clock.sleeps,0,phase);
+  assert.equal(logs.some(line=>line.includes('event=investigator_payment_retry')),false,phase);
+  if(phase==='rejected')assert.equal(state.steps.investigation.payments.invoice.phase,'failed');
+  else{
+   assert.equal(state.status,'needs_inspection',phase);
+   assert.equal(state.inspection.code,'investigator_payment_unknown');
+  }
+ });
+});
+
+test('restart after a crash during the payment retry wait continues with the journaled next attempt, no extra attempt',async()=>{
+ await withCase(async(store,caseId)=>{
+  const m=mocks({payFails:{invoice:['failed_before_signing','failed_before_signing']}});
+  // The crash hits the first write after the wait for attempt 3, so attempt 3 is journaled (retry_after_ms) but never started.
+  const crashing=crashOnce(store,state=>{const entry=state.steps.investigation?.payments?.invoice;return entry?.attempt===3&&entry.retry_after_ms===undefined;});
+  await assert.rejects(runCase(caseId,deps(crashing,m)),/simulated crash/);
+  assert.deepEqual([store.read(caseId).steps.investigation.payments.invoice.attempt,store.read(caseId).steps.investigation.payments.invoice.retry_after_ms],[3,5000]);
+  assert.equal(rolePayments(m,'invoice'),2);
+  const d=deps(store,m);
+  const state=await runCase(caseId,d);
+  assert.equal(state.status,'completed',JSON.stringify(state.inspection));
+  assert.deepEqual([state.steps.investigation.payments.invoice.phase,state.steps.investigation.payments.invoice.attempt],['paid',3]);
+  assert.equal(rolePayments(m,'invoice'),3);
+  assert.equal(d.clock.sleeps,0,'the resumed attempt runs at once');
+ });
+});
+
 test('restart with a journaled decision POST is verified by a read, never resent',async()=>{
  await withCase(async(store,caseId)=>{
   const m=mocks();

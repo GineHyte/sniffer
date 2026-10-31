@@ -139,6 +139,26 @@ test('requirements outside the cap or to another address are never signed',async
  }finally{rmSync(dir,{recursive:true,force:true});}
 });
 
+test('named bug (case-833a92c7…, 2026-10-31): a provider error while building the tx is failed_before_signing, and the same key may pay again',async()=>{
+ const dir=temp();
+ try{
+  const path=payJournalPath(dir,'case1-invoice');
+  const signer=mockSigner();
+  const sign=signer.buildAndSignPaymentTransaction;
+  let fail=true;
+  signer.buildAndSignPaymentTransaction=async requirements=>{if(fail){fail=false;throw new Error('Failed to fetch protocol parameters: Blockfrost getProtocolParameters failed');}return sign(requirements);};
+  const fetchImpl=mockServer();
+  await assert.rejects(payOnce({...args(dir),signer,fetchImpl}),/getProtocolParameters/);
+  const failed=readPayJournal(path);
+  assert.equal(failed.phase,'failed_before_signing');assert.equal(failed.txHash,undefined);assert.equal(failed.attempt,1);
+  assert.equal(fetchImpl.events.some(event=>event.startsWith('paid:')),false,'nothing was offered to the server');
+  const paid=await payOnce({...args(dir),signer,fetchImpl});
+  assert.equal(paid.phase,'paid');assert.equal(paid.attempt,2);assert.equal(signer.signed,1);
+  assert.deepEqual(paid.previousAttempts.map(({attempt,phase})=>({attempt,phase})),[{attempt:1,phase:'failed_before_signing'}]);
+  assert.match(paid.previousAttempts[0].error,/getProtocolParameters/);
+ }finally{rmSync(dir,{recursive:true,force:true});}
+});
+
 test('two concurrent payOnce calls on one wallet run one after another',async()=>{
  const dir=temp();
  try{

@@ -9,7 +9,9 @@
 //  - the initial check is resent only after `connect_failed` (no TCP connection, so nothing reached Rust);
 //  - a failed or interrupted Sokosumi create is resolved by a read-only `tasks list` check: one match is adopted,
 //    provably none allows a new create (max 3 attempts), anything else stops for inspection.
-// Payments go through payOnce, whose own journal makes a resumed call return the earlier result.
+// Payments go through payOnce, whose own journal makes a resumed call return the earlier result. An investigator payment
+// whose payOnce journal is `failed_before_signing` (nothing signed) is retried up to 3 times after 2 s, 5 s, 10 s
+// (user decision 2026-10-31); every other failure keeps its outcome (rejected → unpaid, pending/unknown → inspection).
 // Early start: the intake gate accepts a verified and submitted customer tx (intake.state 'submitted'). The initial check
 // and task creation run at once, but no money moves before the intake is confirmed: payInvestigators and payout first
 // await deps.awaitIntake(caseId) → 'confirmed' | 'failed' (case failed, intake_not_confirmed) | 'timeout' (inspection,
@@ -46,6 +48,9 @@ export const DEFAULT_INITIAL_CHECK_MAX_ATTEMPTS=4; // 1 send + at most 3 resends
 export const DEFAULT_INITIAL_CHECK_BACKOFF_MS=2_000; // 2 s, 4 s, 8 s
 export const DEFAULT_TASK_CREATE_MAX_ATTEMPTS=3;
 export const DEFAULT_TASK_CHECK_DELAY_MS=10_000; // lets an in-flight create land before the read-only check
+// Waits before each retry of an investigator payment that failed before signing (e.g. a transient Blockfrost error while
+// building the tx, measured 2026-10-31). Its length is the retry count: 4 attempts at most.
+export const DEFAULT_INVESTIGATOR_PAYMENT_BACKOFF_MS=Object.freeze([2_000,5_000,10_000]);
 
 async function loadInvestigationContext(ctx,result){
  const {deps}=ctx;
@@ -236,32 +241,48 @@ async function payInvestigators(ctx){
  const {caseId,deps,save}=ctx;
  const inv=()=>ctx.state.steps.investigation;
  const journalDir=deps.store.payJournalDir(caseId);
+ const backoff=deps.config.investigatorPaymentBackoffMs??DEFAULT_INVESTIGATOR_PAYMENT_BACKOFF_MS;
  for(const role of INVESTIGATOR_ROLES){
   const payment=inv().payments[role];
   if(payment?.phase==='paid'||payment?.phase==='failed')continue;
   if(payment?.phase==='unknown')throw new CaseStop('investigator_payment_unknown',`The ${role} payment is unknown. Inspect ${payJournalPath(journalDir,`${caseId}-${role}`)}.`);
-  // No entry, or a crash during payOnce ('paying'): payOnce's own journal returns a finished payment or refuses an open one.
+  // No entry, or a crash during payOnce ('paying'): payOnce's own journal returns a finished payment, refuses an open one,
+  // or tries again after a failure before signing. A resumed case continues with the journaled attempt number.
   const investigator=deps.config.investigators[role];
   const key=investigatorTaskId(caseId,role);
   const taskId=inv().tasks[role].task_id;
-  save(state=>{state.steps.investigation.payments[role]={phase:'paying',at:iso(deps.clock.now())};});
-  try{
-   const journal=await deps.payOnce({url:investigator.url.replace(/\/+$/,'')+investigatorPayPath(taskId),key,journalDir,signer:deps.payer,
-    payTo:investigator.payTo,maxLovelace:deps.config.investigatorPriceLovelace,init:{method:'POST'}});
-   save(state=>{state.steps.investigation.payments[role]={phase:'paid',tx_hash:journal?.txHash??null,payment_made:journal?.paymentMade??null,journal_phase:journal?.phase??null,at:iso(deps.clock.now())};});
-   deps.log?.(`case=${caseId} event=investigator_paid role=${role}${journal?.txHash?` tx_hash=${journal.txHash}`:''}`);
-  }catch(error){
-   let journal;
-   try{journal=readPayJournal(payJournalPath(journalDir,key));}catch{journal={phase:'unreadable'};}
-   if(!journal||journal.phase==='failed_before_signing'||journal.phase==='rejected'){
-    // Nothing was signed, or the signed tx provably can never land: the investigator is not paid, so it will not run.
-    // Its report counts as missing (fail closed).
-    save(state=>{state.steps.investigation.payments[role]={phase:'failed',error:clip(error?.message),at:iso(deps.clock.now())};});
-    deps.log?.(`case=${caseId} event=investigator_payment_failed role=${role}`);
-    continue;
+  let attempt=payment?.phase==='paying'&&Number.isInteger(payment.attempt)&&payment.attempt>0?payment.attempt:1;
+  for(;;){
+   save(state=>{state.steps.investigation.payments[role]={phase:'paying',attempt,at:iso(deps.clock.now())};});
+   try{
+    const journal=await deps.payOnce({url:investigator.url.replace(/\/+$/,'')+investigatorPayPath(taskId),key,journalDir,signer:deps.payer,
+     payTo:investigator.payTo,maxLovelace:deps.config.investigatorPriceLovelace,init:{method:'POST'}});
+    save(state=>{state.steps.investigation.payments[role]={phase:'paid',tx_hash:journal?.txHash??null,payment_made:journal?.paymentMade??null,journal_phase:journal?.phase??null,attempt,at:iso(deps.clock.now())};});
+    deps.log?.(`case=${caseId} event=investigator_paid role=${role}${journal?.txHash?` tx_hash=${journal.txHash}`:''}`);
+    break;
+   }catch(error){
+    let journal;
+    try{journal=readPayJournal(payJournalPath(journalDir,key));}catch{journal={phase:'unreadable'};}
+    if(journal?.phase==='failed_before_signing'&&attempt<=backoff.length){
+     // payOnce wrote failed_before_signing only while no signed payload existed outside this process, so another attempt
+     // cannot pay twice. The next attempt is journaled before the wait, so a crash here never adds an attempt.
+     const delay=backoff[attempt-1];
+     attempt+=1;
+     save(state=>{state.steps.investigation.payments[role]={phase:'paying',attempt,retry_after_ms:delay,last_error:clip(error?.message),at:iso(deps.clock.now())};});
+     deps.log?.(`case=${caseId} event=investigator_payment_retry role=${role} attempt=${attempt} delay_ms=${delay} error=${clip(error?.message,200)}`);
+     await deps.clock.sleep(delay);
+     continue;
+    }
+    if(!journal||journal.phase==='failed_before_signing'||journal.phase==='rejected'){
+     // Nothing was signed (retries exhausted), or the signed tx provably can never land: the investigator is not paid,
+     // so it will not run. Its report counts as missing (fail closed).
+     save(state=>{state.steps.investigation.payments[role]={phase:'failed',error:clip(error?.message),attempt,at:iso(deps.clock.now())};});
+     deps.log?.(`case=${caseId} event=investigator_payment_failed role=${role} attempt=${attempt}`);
+     break;
+    }
+    save(state=>{state.steps.investigation.payments[role]={phase:'unknown',journal_phase:journal.phase,tx_hash:journal.txHash??null,error:clip(error?.message,2000),attempt};});
+    throw new CaseStop('investigator_payment_unknown',`The ${role} payment may have been submitted (payOnce journal phase ${journal.phase}). ${clip(error?.message,2000)}`);
    }
-   save(state=>{state.steps.investigation.payments[role]={phase:'unknown',journal_phase:journal.phase,tx_hash:journal.txHash??null,error:clip(error?.message,2000)};});
-   throw new CaseStop('investigator_payment_unknown',`The ${role} payment may have been submitted (payOnce journal phase ${journal.phase}). ${clip(error?.message,2000)}`);
   }
  }
 }

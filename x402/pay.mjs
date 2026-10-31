@@ -2,6 +2,9 @@
 // Journal phases: pending (written BEFORE anything is signed) -> paid | no_payment_required | unknown | rejected | failed_before_signing.
 // An existing paid journal is returned without paying again. unknown or pending is never retried automatically.
 // rejected = signed, not confirmed, and proven unable to ever land (an input is spent on chain by another tx); safe to retry.
+// failed_before_signing = no signed payload left this process: txHash is journaled by the afterPaymentCreation hook, which
+// @x402/core awaits before @x402/fetch sends the payload (a throwing hook aborts the send). Safe to retry with the same key;
+// each retry bumps attempt and keeps earlier failures in previousAttempts.
 // Payments from one wallet run one at a time in this process: the reference signer spends the wallet's first UTXO as nonce.
 // The signer reads UTxOs from Blockfrost /addresses/{addr}/utxos, which can still list an input our previous payment
 // spent (measured 2026-10-31, case-7c525f29…: invoice tx 544864fc spent 5814fa9e#0, the wallet payment 1 ms later
@@ -220,6 +223,7 @@ async function payLocked({url,key,path,signer,wallet,payTo,max,network,init,fetc
 
  const state={key,phase:'pending',url,wallet,payTo,maxLovelace:max,network,attempt:(existing?.attempt??0)+1,createdAt:now().toISOString()};
  if(existing?.phase==='rejected')state.previousAttempts=[...(existing.previousAttempts??[]),{attempt:existing.attempt,phase:'rejected',txHash:existing.txHash,rejection:existing.rejection}];
+ else if(existing?.phase==='failed_before_signing')state.previousAttempts=[...(existing.previousAttempts??[]),{attempt:existing.attempt,phase:'failed_before_signing',error:existing.error,failedAt:existing.updatedAt}];
  const save=patch=>{Object.assign(state,patch,{updatedAt:now().toISOString()});writeJsonAtomic(path,state);};
  save({});
 
