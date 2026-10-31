@@ -1,8 +1,8 @@
 # Sniffer MVP: Progress Journal
 
 Read this first when resuming. The full plan is in `docs/plans/2026-10-30-sniffer-mvp.md` (decision log §0 and agent-assignment table).
-Last update: 2026-10-31. Branch: `feat/mvp`, 30 commits ahead of `main`, working tree clean.
-Overall: **about 70%.** The Rust backend (Initial Check, payouts, supplier history), the x402 gate and payer, and the payout transfer are done; a live x402 payment is measured. The agent orchestration (T25, T26), live provisioning and E2E are not done yet.
+Last update: 2026-10-31. Branch: `feat/mvp`, fast-forwarded into `main` and pushed to `origin/main` (public repo `GineHyte/sniffer`).
+Overall: **about 85%.** All code tasks through T27 are done: Rust backend (Initial Check, payouts, supplier history), x402 gate and payer (live payment measured), payout transfer, investigator API and worker, Main orchestrator. Left: T28 live provisioning, T29 E2E demo, T30 verification, safety review and README rewrite.
 
 ## Working rules (from the user)
 - Split work into small tasks. Give each task to one project agent (see `.claude/agents/AGENTS.md`). Only one agent edits a given file at a time.
@@ -40,8 +40,30 @@ Overall: **about 70%.** The Rust backend (Initial Check, payouts, supplier histo
 | T27 (0624459) | `payout/transfer.mjs` (Evolution SDK). Never resubmits. `.local/payout.env` format: `PAYOUT_MNEMONIC="<24 words>"` + optional `PAYOUT_ACCOUNT_INDEX` (T28 creates it). The local journal claim does not stop two machines from paying one intent. |
 | Tests now | `cargo test`: lib 298, acceptance 32 (+2 ignored), cli_it 1, decisions_it 7, history_it 2, payouts_it 18, store_it 2. Clippy and fmt clean. `npm test` 100/100. |
 
-## Next: wave 7
+## Wave 7 (DONE 2026-10-31; pushed to origin/main). Next: T28 live provisioning, T29 E2E demo, T30 verify/review/README.
 Wave 6 (T19, T20, T22, T27) is done and committed.
+Shared interface written by the main session first (376cd4d): `investigator/contract.mjs` (task description schema, `task_id = <case_id>-<role>`, Sokosumi task ID check, `/pay/{taskId}` path) and `sokosumi-cli.mjs` (CLI JS entry via `process.execPath`, no shell). `package.json` test script already globs `investigator/` and `main/`, so agents do not edit it.
+
+| Task | Owner | Files |
+|---|---|---|
+| T25 investigator API + worker gate + Eve multi-process check | general | `investigator/*` (not contract), `worker.mjs`, `worker-lock*` — DONE (`npm test` 186/186). |
+
+T25 notes:
+- **Eve:** two role processes cannot share one app root (Eve allows one dev server per root, `.eve/dev-server-state.v1.json`). Each role now gets its own app root `.local/eve-<role>/` via `investigator/eve-root.mjs` (copies `agent/` and `promts/` on every start, links `node_modules`). Restart a role's Eve after a prompt change. Delete a role root with `fs.rmSync` only.
+- **Fail closed:** invalid input → journaled `failed`, task not completed (Main times out → rejected/formal). Valid input but no valid model report → completed with a code-built `INSUFFICIENT_DATA` report. A crash during runtime start/complete → blocked for inspection.
+- **Run:** `npm run investigator:eve|investigator:api|investigator:worker -- <role>`; the argument wins over `AGENT_ROLE`. Default ports 21961/21962/21963.
+- **For T28:** keep per-role prices ≤ the shared `INVESTIGATOR_PRICE_LOVELACE` (Main's payment cap). Main reads `MAIN_EVE_URL`; the launcher uses `EVE_URL_MAIN`, so set both to the same URL or run main's Eve from the repo root with `npm start`.
+| T26 main orchestrator + `decide.mjs` | general | `main/*` — DONE 496796d + Q1/Q2 follow-up 66bc630 (51 tests). |
+
+T26 decisions (user, 2026-10-31):
+- Q1: a failed `tasks create` triggers a read-only `tasks list` check; exactly one match → continue, provably none → recreate (bounded), otherwise inspection.
+- Q2: resend `POST /v1/initial-check` only on a connect error (nothing reached Rust); anything else → inspection.
+- Q3: an unsigned investigator payment failure → rejected/formal immediately (unchanged).
+- Q5: `.local/payout.env` stays required at Main startup.
+- Main LLM failure or invalid JSON → rejected/formal. Decline reasons are built by code only (fixed German texts + criterion `customer_text`), filtered for betrug/fraud.
+- Suggested script: `"main": "node --env-file-if-exists=.env main/api.mjs"`, run with `--confirm-live-payments`.
+- Q1 caveats (verify in T28/T29 live): the "provably none" proof assumes the server honours `take=100` and filters by `coworkerId`; a create that lands later than the 10 s re-check can leave an unpaid orphan READY task (never worked, never paid).
+- Q2 change: a 503 from Rust initial-check now stops for inspection (was `failed`).
 - **T25:** investigator API and worker gate. Also verify that 2+ Eve role processes run in parallel; if not, give each role its own app root under `.local/eve-<role>/`. Fix `worker.mjs` `execFileSync('sokosumi')` on Windows: run the CLI's JS entry with `process.execPath`, never `shell: true` with task IDs.
 - **T26:** Main orchestrator with `decide.mjs` guardrails.
 - **T28:** live provisioning (asks the user at each step).
