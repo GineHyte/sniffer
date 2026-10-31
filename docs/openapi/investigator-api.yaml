@@ -1,0 +1,524 @@
+openapi: 3.1.0
+info:
+  title: Sniffer Investigator API
+  version: 1.0.0
+  summary: x402 payment endpoint of one investigator role (invoice, wallet or supplier).
+  description: |
+    One process per investigator role, started with
+    `node --env-file=.env investigator/api.mjs <role>` (source: `investigator/api.mjs`).
+    It binds `127.0.0.1` only, on `INVESTIGATOR_<ROLE>_PORT` / `INVESTIGATOR_PORT`, else the defaults
+    invoice 21961, wallet 21962, supplier 21963 (`investigator/config.mjs` `DEFAULT_PORTS`).
+
+    The API starts no work. `POST /pay/{taskId}` only records a confirmed x402 payment for that
+    Sokosumi task ID in the role's gate journal (`.local/investigator-<role>/gate-journal.json`).
+    The role's worker (`investigator/worker.mjs`) starts the Sokosumi task once it sees the payment.
+
+    **Payment (x402 v2, Cardano Preprod, scheme `exact`, asset `lovelace`).** Cardano supports only the
+    authorization flow (`docs/x402-notes.md` §3.2 and §4): the gate verifies the signed transaction, settles it
+    itself through the in-process facilitator, and answers 200 only after a *confirmed* settlement of exactly
+    that transaction. Mempool never counts. Flow:
+
+    1. `POST /pay/{taskId}` without `PAYMENT-SIGNATURE` → `402`, empty JSON body `{}`, payment requirements
+       base64-encoded in the `PAYMENT-REQUIRED` header.
+    2. The client signs a transaction that pays `amount` lovelace to `payTo` and retries with the base64
+       `PaymentPayload` in `PAYMENT-SIGNATURE`.
+    3. `200` with `{task_id, paid: true, tx_hash}` and the settlement receipt in `PAYMENT-RESPONSE`.
+
+    Replay protection (`x402/gate.mjs`): a persistent journal binds each transaction hash to exactly one task ID
+    and each task ID to at most one live payment. A task that is already paid answers `200` again (same receipt)
+    for a request without `PAYMENT-SIGNATURE` or with the same transaction, and `409` for any other transaction.
+
+    No authentication besides the x402 payment. Any request body is discarded; a declared
+    `Content-Length` above 65536 bytes is refused with `413`.
+  contact:
+    name: Sniffer team
+servers:
+  - url: http://127.0.0.1:21961
+    description: invoice role (default port)
+  - url: http://127.0.0.1:21962
+    description: wallet role (default port)
+  - url: http://127.0.0.1:21963
+    description: supplier role (default port)
+tags:
+  - name: health
+    description: Liveness of the role API.
+  - name: payment
+    description: x402-gated payment for one Sokosumi investigator task.
+security: []
+paths:
+  /health:
+    get:
+      tags: [health]
+      operationId: getHealth
+      summary: Liveness and role
+      description: Always 200 while the process runs. Reports which role this process serves.
+      security: []
+      responses:
+        '200':
+          description: The API is up.
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/CacheControlNoStore'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Health'
+              example:
+                ok: true
+                role: invoice
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
+        '413':
+          $ref: '#/components/responses/BodyTooLarge'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    head:
+      tags: [health]
+      operationId: headHealth
+      summary: Liveness (headers only)
+      description: Same as `GET /health` without a body.
+      security: []
+      responses:
+        '200':
+          description: The API is up.
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
+        '413':
+          $ref: '#/components/responses/BodyTooLarge'
+  /pay/{taskId}:
+    parameters:
+      - $ref: '#/components/parameters/TaskId'
+    post:
+      tags: [payment]
+      operationId: payInvestigatorTask
+      summary: Pay for one investigator task (x402)
+      description: |
+        Records a confirmed x402 payment for the Sokosumi task `taskId`. The x402 resource ID is the task ID
+        itself, so one payment pays exactly one task. The request body is ignored.
+
+        Check order (`investigator/api.mjs`): declared body size → method (`405` unless POST) → task ID
+        (`400 invalid_task_id`) → x402 gate. Any path below `/pay/` that is not exactly `/pay/{taskId}`
+        (for example `/pay/a/b`) is answered `400 invalid_task_id`, not 404.
+
+        The `PAYMENT-REQUIRED` header carries an `X402PaymentRequired` object. Its `resource.url` is built
+        from the request's `Host` header and path, `resource.description` is `Sniffer investigator task`,
+        `accepts[0].amount` is `INVESTIGATOR_<ROLE>_PRICE_LOVELACE` and `accepts[0].payTo` is
+        `INVESTIGATOR_<ROLE>_PAY_TO`.
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/PaymentSignature'
+      responses:
+        '200':
+          description: |
+            The payment for this task is confirmed on L1 and recorded (or was already recorded earlier).
+            `PAYMENT-RESPONSE` carries the settlement receipt; it is set whenever the journal holds one.
+          headers:
+            PAYMENT-RESPONSE:
+              $ref: '#/components/headers/PaymentResponse'
+            Cache-Control:
+              $ref: '#/components/headers/CacheControlNoStore'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PayResult'
+              example:
+                task_id: task_01jbx7zq8v3k6m2n4p5r7s9t0w
+                paid: true
+                tx_hash: 4fcbf4357e8a6d6eb55e4d03f573e028d40957fd3d15b604d517afc37814e967
+        '400':
+          description: |
+            `invalid_task_id`: the path segment is not a valid Sokosumi task ID
+            (`^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$` after percent-decoding).
+            `invalid_payment_payload`: the verified payload carries no decodable Cardano transaction.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                invalid_task_id:
+                  value:
+                    error: invalid_task_id
+                invalid_payment_payload:
+                  value:
+                    error: invalid_payment_payload
+        '402':
+          $ref: '#/components/responses/PaymentRequired'
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
+        '409':
+          $ref: '#/components/responses/PaymentConflict'
+        '413':
+          $ref: '#/components/responses/BodyTooLarge'
+        '500':
+          $ref: '#/components/responses/PaymentGateError'
+components:
+  parameters:
+    TaskId:
+      name: taskId
+      in: path
+      required: true
+      description: Sokosumi task ID (not the logical `<case_id>-<role>` report task ID). Percent-decoded before validation.
+      schema:
+        type: string
+        pattern: '^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$'
+      example: task_01jbx7zq8v3k6m2n4p5r7s9t0w
+    PaymentSignature:
+      name: PAYMENT-SIGNATURE
+      in: header
+      required: false
+      description: |
+        x402 v2 payment header: base64 (standard alphabet) of the JSON `X402PaymentPayload`. Omit it on the
+        first call to receive the 402 with `PAYMENT-REQUIRED`. Only the first value is read if the header repeats.
+      schema:
+        type: string
+        contentEncoding: base64
+        contentMediaType: application/json
+        contentSchema:
+          $ref: '#/components/schemas/X402PaymentPayload'
+      example: eyJ4NDAyVmVyc2lvbiI6MiwicmVzb3VyY2UiOnsidXJsIjoiaHR0cDovLzEyNy4wLjAuMToyMTk2MS9wYXkvdGFza18wMWpieDd6cTh2M2s2bTJuNHA1cjdzOXQwdyIsImRlc2NyaXB0aW9uIjoiU25pZmZlciBpbnZlc3RpZ2F0b3IgdGFzayIsIm1pbWVUeXBlIjoiYXBwbGljYXRpb24vanNvbiJ9LCJhY2NlcHRlZCI6eyJzY2hlbWUiOiJleGFjdCIsIm5ldHdvcmsiOiJjYXJkYW5vOnByZXByb2QiLCJhbW91bnQiOiIxMDAwMDAwIiwiYXNzZXQiOiJsb3ZlbGFjZSIsInBheVRvIjoiYWRkcl90ZXN0MXZxcnN3cGM4cXVyc3dwYzhxdXJzd3BjOHF1cnN3cGM4cXVyc3dwYzhxdXJzd3Bjanc1OXRhIiwibWF4VGltZW91dFNlY29uZHMiOjYwMCwiZXh0cmEiOnsiYXJlRmVlc1Nwb25zb3JlZCI6ZmFsc2UsImNvbmZpcm1hdGlvblBvbGljeSI6eyJsMUNvbmZpcm1hdGlvbnMiOjB9fX0sInBheWxvYWQiOnsidHJhbnNhY3Rpb24iOiJoS01BZ1lKWUlBY0hCd2NIQndjSEJ3Y0hCd2NIQndjSEJ3Y0hCd2NIQndjSEJ3Y0hCd2NIQUFHQmdsZ2RZQWNIQndjSEJ3Y0hCd2NIQndjSEJ3Y0hCd2NIQndjSEJ3Y0hCd2NhQUE5Q1FBSWFBQUtZRUtEMTlnPT0iLCJub25jZSI6IjA3MDcwNzA3MDcwNzA3MDcwNzA3MDcwNzA3MDcwNzA3MDcwNzA3MDcwNzA3MDcwNzA3MDcwNzA3MDcwNzA3MDcjMCJ9fQ==
+  headers:
+    CacheControlNoStore:
+      description: Always `no-store`.
+      schema:
+        type: string
+        const: no-store
+    Allow:
+      description: Allowed methods for the path (`GET, HEAD` on `/health`, `POST` on `/pay/{taskId}`).
+      schema:
+        type: string
+      example: POST
+    PaymentRequired:
+      description: |
+        x402 v2 payment requirements: base64 (standard alphabet) of the JSON `X402PaymentRequired`.
+        The 402 body itself is the empty object `{}`.
+      required: true
+      schema:
+        type: string
+        contentEncoding: base64
+        contentMediaType: application/json
+        contentSchema:
+          $ref: '#/components/schemas/X402PaymentRequired'
+      example: eyJ4NDAyVmVyc2lvbiI6MiwiZXJyb3IiOiJQYXltZW50IHJlcXVpcmVkIiwicmVzb3VyY2UiOnsidXJsIjoiaHR0cDovLzEyNy4wLjAuMToyMTk2MS9wYXkvdGFza18wMWpieDd6cTh2M2s2bTJuNHA1cjdzOXQwdyIsImRlc2NyaXB0aW9uIjoiU25pZmZlciBpbnZlc3RpZ2F0b3IgdGFzayIsIm1pbWVUeXBlIjoiYXBwbGljYXRpb24vanNvbiJ9LCJhY2NlcHRzIjpbeyJzY2hlbWUiOiJleGFjdCIsIm5ldHdvcmsiOiJjYXJkYW5vOnByZXByb2QiLCJhbW91bnQiOiIxMDAwMDAwIiwiYXNzZXQiOiJsb3ZlbGFjZSIsInBheVRvIjoiYWRkcl90ZXN0MXZxcnN3cGM4cXVyc3dwYzhxdXJzd3BjOHF1cnN3cGM4cXVyc3dwYzhxdXJzd3Bjanc1OXRhIiwibWF4VGltZW91dFNlY29uZHMiOjYwMCwiZXh0cmEiOnsiYXJlRmVlc1Nwb25zb3JlZCI6ZmFsc2UsImNvbmZpcm1hdGlvblBvbGljeSI6eyJsMUNvbmZpcm1hdGlvbnMiOjB9fX1dfQ==
+    PaymentResponse:
+      description: |
+        x402 v2 settlement receipt: base64 (standard alphabet) of the JSON `X402SettleResponse`.
+        On 200 it reports `success: true` for the confirmed transaction. On a 402 after a failed settlement it
+        reports `success: false` with `errorReason`.
+      schema:
+        type: string
+        contentEncoding: base64
+        contentMediaType: application/json
+        contentSchema:
+          $ref: '#/components/schemas/X402SettleResponse'
+      example: eyJzdWNjZXNzIjp0cnVlLCJ0cmFuc2FjdGlvbiI6IjRmY2JmNDM1N2U4YTZkNmViNTVlNGQwM2Y1NzNlMDI4ZDQwOTU3ZmQzZDE1YjYwNGQ1MTdhZmMzNzgxNGU5NjciLCJuZXR3b3JrIjoiY2FyZGFubzpwcmVwcm9kIiwicGF5ZXIiOiJhZGRyX3Rlc3QxdnpwYXllcndhbGxldGZvcnBheXRlc3Rzb25seTAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAiLCJleHRyYSI6eyJzdGF0dXMiOiJjb25maXJtZWQiLCJjb25maXJtYXRpb25zIjowfX0=
+  responses:
+    PaymentRequired:
+      description: |
+        Payment required or not (yet) accepted. Four shapes, all with status 402 (`x402/gate.mjs`):
+
+        * **No payment** (no `PAYMENT-SIGNATURE`): body `{}`, `PAYMENT-REQUIRED` header set; its decoded
+          `error` is `Payment required`.
+        * **Offer refused before settlement** (`PAYMENT-SIGNATURE` present, but no matching requirement, an invalid
+          payload or failed verification): body `{"error": "verify_failed", "reason": "<x402 reason>"}`, plus
+          `"submitted": false` when this gate never settled that transaction (no journal entry). `PAYMENT-REQUIRED`
+          is set again with the same reason in its `error`. Added in the working tree of `x402/gate.mjs`
+          (`sendRejectedOffer`), not yet committed when this file was written.
+        * **Settlement failed**: body `{}`, `PAYMENT-RESPONSE` header with `success: false` and `errorReason`.
+          The transaction stays bound to this resource; the same payload may be retried.
+        * **Settlement not confirmed** (accepted by the facilitator but not confirmed on L1 within the
+          facilitator timeout, or a different transaction hash): body `{"error": "settlement_not_confirmed"}`.
+          The transaction stays bound; retry with the same `PAYMENT-SIGNATURE`.
+      headers:
+        PAYMENT-REQUIRED:
+          $ref: '#/components/headers/PaymentRequired'
+        PAYMENT-RESPONSE:
+          $ref: '#/components/headers/PaymentResponse'
+        Cache-Control:
+          $ref: '#/components/headers/CacheControlNoStore'
+      content:
+        application/json:
+          schema:
+            oneOf:
+              - $ref: '#/components/schemas/EmptyObject'
+              - $ref: '#/components/schemas/X402RejectedOffer'
+              - $ref: '#/components/schemas/Error'
+          examples:
+            payment_required:
+              summary: First call, no PAYMENT-SIGNATURE (requirements are in the PAYMENT-REQUIRED header)
+              value: {}
+            verify_failed:
+              summary: Offer refused before settlement (measured with a mock facilitator)
+              value:
+                error: verify_failed
+                reason: invalid_exact_cardano_payload_amount_mismatch
+                submitted: false
+            settlement_not_confirmed:
+              value:
+                error: settlement_not_confirmed
+    PaymentConflict:
+      description: |
+        Replay protection refused the payment (`x402/gate.mjs`):
+        `payment_already_used`: this transaction is already bound to another resource (task).
+        `resource_already_paid`: this task is already paid with a different transaction.
+        `resource_payment_in_progress`: another transaction for this task is settling, pending or unknown.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          examples:
+            payment_already_used:
+              value:
+                error: payment_already_used
+            resource_already_paid:
+              value:
+                error: resource_already_paid
+            resource_payment_in_progress:
+              value:
+                error: resource_payment_in_progress
+    PaymentGateError:
+      description: |
+        `payment_gate_error`: unexpected gate failure (facilitator unreachable, settle threw, journal unreadable).
+        If settlement threw, the transaction stays bound to the task in state `unknown` and blocks other
+        payments for it. `payment_gate_misconfigured`: the x402 server reported an unexpected result type.
+        `internal_error`: any other handler failure.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          examples:
+            payment_gate_error:
+              value:
+                error: payment_gate_error
+            internal_error:
+              value:
+                error: internal_error
+    InternalError:
+      description: Unexpected handler failure.
+      headers:
+        Cache-Control:
+          $ref: '#/components/headers/CacheControlNoStore'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error: internal_error
+    MethodNotAllowed:
+      description: Wrong method for this path. The `Allow` header lists the accepted methods.
+      headers:
+        Allow:
+          $ref: '#/components/headers/Allow'
+        Cache-Control:
+          $ref: '#/components/headers/CacheControlNoStore'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error: method_not_allowed
+    BodyTooLarge:
+      description: |
+        The declared `Content-Length` exceeds 65536 bytes. The server answers with `Connection: close` and
+        destroys the request. Checked before routing, so it applies to every path.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error: body_too_large
+  schemas:
+    Error:
+      type: object
+      description: Error body of the Node APIs. Only a machine code, no message.
+      required: [error]
+      additionalProperties: false
+      properties:
+        error:
+          type: string
+          description: Machine-readable error code.
+          examples: [invalid_task_id]
+    X402RejectedOffer:
+      type: object
+      description: 402 body for a payment offer refused before settlement (`sendRejectedOffer` in `x402/gate.mjs`).
+      required: [error, reason]
+      additionalProperties: false
+      properties:
+        error:
+          type: string
+          const: verify_failed
+        reason:
+          type: string
+          maxLength: 500
+          description: The x402 refusal reason from the `PAYMENT-REQUIRED` header (`payment_rejected` if it cannot be decoded).
+        submitted:
+          type: boolean
+          const: false
+          description: Present only when the gate journal has no entry for the offered transaction, so this gate never submitted it.
+    EmptyObject:
+      type: object
+      description: The empty JSON object `{}` (x402 402 body; the requirements travel in `PAYMENT-REQUIRED`).
+      maxProperties: 0
+    Health:
+      type: object
+      required: [ok, role]
+      additionalProperties: false
+      properties:
+        ok:
+          type: boolean
+          const: true
+        role:
+          $ref: '#/components/schemas/InvestigatorRole'
+    InvestigatorRole:
+      type: string
+      enum: [invoice, wallet, supplier]
+    PayResult:
+      type: object
+      required: [task_id, paid, tx_hash]
+      additionalProperties: false
+      properties:
+        task_id:
+          type: string
+          description: The Sokosumi task ID from the path.
+          pattern: '^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$'
+        paid:
+          type: boolean
+          const: true
+        tx_hash:
+          $ref: '#/components/schemas/CardanoTxHash'
+    CardanoTxHash:
+      type: string
+      description: Cardano transaction ID, 64 lowercase hex characters.
+      pattern: '^[0-9a-f]{64}$'
+    X402PaymentRequired:
+      type: object
+      description: |
+        x402 v2 `PaymentRequired` (`@x402/core@2.28.0` `createPaymentRequiredResponse`), carried base64-encoded in
+        the `PAYMENT-REQUIRED` header.
+      required: [x402Version, resource, accepts]
+      properties:
+        x402Version:
+          type: integer
+          const: 2
+        error:
+          type: string
+          description: '`Payment required` when no payment was sent; otherwise the reason the offered payment was refused (repeated as `reason` in the 402 body).'
+        resource:
+          $ref: '#/components/schemas/X402ResourceInfo'
+        accepts:
+          type: array
+          minItems: 1
+          items:
+            $ref: '#/components/schemas/X402PaymentRequirements'
+        extensions:
+          type: object
+          additionalProperties: true
+    X402ResourceInfo:
+      type: object
+      required: [url, description, mimeType]
+      properties:
+        url:
+          type: string
+          description: '`http://<Host header><path>` of the gated request.'
+        description:
+          type: string
+          examples: [Sniffer investigator task]
+        mimeType:
+          type: string
+          const: application/json
+    X402PaymentRequirements:
+      type: object
+      description: |
+        One accepted payment option. The gate configures `extra.assetTransferMethod: default`; the Cardano server
+        scheme does not echo it (measured with `@x402/cardano@2.28.0`), so only the fields below appear.
+      required: [scheme, network, amount, asset, payTo, maxTimeoutSeconds]
+      properties:
+        scheme:
+          type: string
+          const: exact
+        network:
+          type: string
+          description: CAIP-2 style network ID. The gate uses `cardano:preprod` (`x402/wallets.mjs` NETWORK).
+          examples: [cardano:preprod]
+        amount:
+          type: string
+          description: Price in lovelace as an integer string.
+          pattern: '^[0-9]+$'
+          examples: ['1000000']
+        asset:
+          type: string
+          const: lovelace
+        payTo:
+          type: string
+          description: Receiver bech32 address (`addr_test1…` on Preprod).
+        maxTimeoutSeconds:
+          type: integer
+          const: 600
+        extra:
+          type: object
+          properties:
+            areFeesSponsored:
+              type: boolean
+              const: false
+            confirmationPolicy:
+              type: object
+              properties:
+                l1Confirmations:
+                  type: integer
+                  minimum: 0
+                  description: Confirmations the gate requires before it counts a payment (default 0 = in a block; mempool never counts).
+          additionalProperties: true
+    X402PaymentPayload:
+      type: object
+      description: x402 v2 `PaymentPayload` for the Cardano `exact` scheme, carried base64-encoded in `PAYMENT-SIGNATURE`.
+      required: [x402Version, accepted, payload]
+      properties:
+        x402Version:
+          type: integer
+          const: 2
+        resource:
+          $ref: '#/components/schemas/X402ResourceInfo'
+        accepted:
+          $ref: '#/components/schemas/X402PaymentRequirements'
+        payload:
+          type: object
+          required: [transaction]
+          properties:
+            transaction:
+              type: string
+              description: Signed Cardano transaction, CBOR, base64.
+            nonce:
+              type: string
+              description: Spent input `<txid>#<index>`.
+          additionalProperties: true
+    X402SettleResponse:
+      type: object
+      description: x402 v2 settlement result, carried base64-encoded in `PAYMENT-RESPONSE`.
+      required: [success]
+      properties:
+        success:
+          type: boolean
+        transaction:
+          type: string
+          description: Cardano transaction ID (empty string on some failures).
+        network:
+          type: string
+          examples: [cardano:preprod]
+        payer:
+          type: string
+          description: Payer bech32 address as reported by the facilitator.
+        errorReason:
+          type: string
+          description: Present only when `success` is false.
+        errorMessage:
+          type: string
+          description: Present only when `success` is false.
+        extra:
+          type: object
+          description: Facilitator evidence; the gate requires `status = confirmed` and `confirmations >= l1Confirmations`.
+          properties:
+            status:
+              type: string
+              examples: [confirmed]
+            confirmations:
+              type: integer
+          additionalProperties: true

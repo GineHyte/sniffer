@@ -1,0 +1,1500 @@
+openapi: 3.1.0
+info:
+  title: Sniffer Initial Check Backend
+  version: 1.0.0
+  summary: Rust initial-check engine, decision store, payout policy and supplier history.
+  description: |
+    The Rust service of Invoice Scam Sniffer (`backend/`, axum; routes in `backend/src/api.rs`,
+    `backend/src/payouts.rs`, `backend/src/history.rs`; structs in `backend/src/model.rs`).
+    Semantics follow `docs/initial-check-spec.md` (German, v1.0): §1.1 interface (FR-01…FR-10), §4 result JSON,
+    §5 endpoints and error codes, §12 payout extension. Section numbers below refer to that document.
+
+    It binds `SNIFFER_BIND_ADDR`, default `0.0.0.0:8080` (`backend/src/config.rs`); callers use
+    `SNIFFER_BASE_URL`, default `http://127.0.0.1:8080`. Internal service: its clients are Main
+    (`main/backend.mjs`) and the payout module (`payout/transfer.mjs`), not customers.
+
+    **Auth (FR-08).** Every endpoint except `/health` requires `Authorization: Bearer <SNIFFER_API_TOKEN>`,
+    compared in constant time. The header must start with exactly `Bearer ` (capital B, one space); otherwise
+    `401 unauthorized`. Auth is checked first, before Content-Type and body (§3.5 step 0).
+
+    **Errors (FR-09, §5.1, §12.7).** Every error body written by the service is
+    `{"error": "<code>", "message": "<text>"}`; `message` never quotes invoice data. Exception: a wrong method on
+    a known path is answered by axum itself with `405`, an `Allow` header and an empty body.
+
+    **Body limit.** `6 × MAX_XML_BYTES + 4096` bytes (default `MAX_XML_BYTES` 500000) for every route →
+    `413 payload_too_large` on endpoints that read a body.
+  contact:
+    name: Sniffer team
+servers:
+  - url: http://127.0.0.1:8080
+    description: Local default (SNIFFER_BIND_ADDR 0.0.0.0:8080)
+tags:
+  - name: health
+    description: Dependency health (§5.5), no auth.
+  - name: checks
+    description: Initial check and stored results (§5.2, §5.3, FR-01…FR-05).
+  - name: decisions
+    description: Agent-stage decisions for medium cases (§5.4).
+  - name: payouts
+    description: Payout policy and intent journal (§12.4, §12.5). The service never signs or submits transactions.
+  - name: suppliers
+    description: Supplier approval history for the agent stage (§12.6).
+security:
+  - bearerAuth: []
+paths:
+  /health:
+    get:
+      tags: [health]
+      operationId: getHealth
+      summary: Dependency health
+      description: |
+        §5.5, FR-07. No authentication. Checks Postgres (`SELECT 1` plus the age of the last successful OFAC
+        import) and Redis (`PING`).
+      security: []
+      responses:
+        '200':
+          description: Postgres and Redis are reachable.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Health'
+              example:
+                status: ok
+                postgres: ok
+                redis: ok
+                sanctions_list_age_hours: 0
+        '503':
+          description: Postgres or Redis is unreachable; the affected service reports `error`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Health'
+              example:
+                status: degraded
+                postgres: ok
+                redis: error
+                sanctions_list_age_hours: 3
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
+  /v1/initial-check:
+    post:
+      tags: [checks]
+      operationId: runInitialCheck
+      summary: Run the initial check on one e-invoice XML
+      description: |
+        FR-01…FR-03, FR-10, flow §3.5. Parses the XML (CII or UBL), validates it with Mustang, checks the payment
+        address, hashes all identities (§3.3), evaluates the criteria catalogue (§3.6) and stores the result.
+        Answers `200` with the result JSON (§4) for every band, also `high`. Each call creates a new `check_id`.
+
+        Check order: auth → Content-Type → body limit → JSON shape (unknown fields rejected) →
+        `xml` length (`MAX_XML_BYTES`, bytes) → `checked_at` rules (FR-03) → check.
+
+        A concurrent check of the same invoice (same `invoice_hash`) is refused with `409 check_in_progress`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/InitialCheckRequest'
+            examples:
+              default:
+                value:
+                  xml: '<?xml version="1.0" encoding="UTF-8"?><rsm:CrossIndustryInvoice xmlns:rsm="urn:un:unece:uncefact:data:standard:CrossIndustryInvoice:100">…</rsm:CrossIndustryInvoice>'
+              with_checked_at:
+                summary: Tests only (ALLOW_CHECKED_AT=true)
+                value:
+                  xml: '<?xml version="1.0" encoding="UTF-8"?><rsm:CrossIndustryInvoice xmlns:rsm="urn:un:unece:uncefact:data:standard:CrossIndustryInvoice:100">…</rsm:CrossIndustryInvoice>'
+                  checked_at: '2026-10-30T14:00:00+02:00'
+      responses:
+        '200':
+          description: The stored result JSON (§4).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CheckResult'
+              examples:
+                medium:
+                  $ref: '#/components/examples/CheckResultMedium'
+        '400':
+          description: |
+            `invalid_request`: body not JSON, wrong types, missing or unknown fields, `checked_at` not RFC 3339
+            (only when `ALLOW_CHECKED_AT=true`). `checked_at_not_allowed`: `checked_at` is present (valid or not)
+            while `ALLOW_CHECKED_AT=false`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                invalid_request:
+                  value:
+                    error: invalid_request
+                    message: wrong field types, missing or unknown fields
+                checked_at_not_allowed:
+                  value:
+                    error: checked_at_not_allowed
+                    message: checked_at is not allowed on this server
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
+        '409':
+          description: A check for the same `invoice_hash` is running (Redis lock).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: check_in_progress
+                message: a check for this invoice is already running
+        '413':
+          description: |
+            `payload_too_large`: the body exceeds `6 × MAX_XML_BYTES + 4096` bytes.
+            `xml_too_large`: `xml` exceeds `MAX_XML_BYTES` bytes (FR-10).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                payload_too_large:
+                  value:
+                    error: payload_too_large
+                    message: request body exceeds the server limit
+                xml_too_large:
+                  value:
+                    error: xml_too_large
+                    message: xml exceeds MAX_XML_BYTES
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '503':
+          $ref: '#/components/responses/DependencyUnavailable'
+  /v1/checks/{check_id}:
+    parameters:
+      - $ref: '#/components/parameters/CheckId'
+    get:
+      tags: [checks]
+      operationId: getCheck
+      summary: Stored result and decision state
+      description: |
+        §5.2, FR-04. `result` is the stored result JSON, unchanged. `decision_state` holds the decision columns of
+        the `invoices` row; it is `null` when there is no `invoices` row (formal K.O. or duplicate). While a medium
+        case is open, every field of `decision_state` is `null`.
+      responses:
+        '200':
+          description: Stored result.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CheckView'
+              examples:
+                decided:
+                  $ref: '#/components/examples/CheckViewDecided'
+                open:
+                  $ref: '#/components/examples/CheckViewOpen'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: Unknown `check_id`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: not_found
+                message: unknown check_id
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
+        '503':
+          $ref: '#/components/responses/DependencyUnavailable'
+  /v1/checks/{check_id}/xml:
+    parameters:
+      - $ref: '#/components/parameters/CheckId'
+    get:
+      tags: [checks]
+      operationId: getCheckXml
+      summary: Original invoice XML
+      description: |
+        §5.3, FR-05. Returns the original XML (BOM stripped) while it is still stored in Redis
+        (`sniffer:xml:<check_id>`, limited retention).
+      responses:
+        '200':
+          description: The stored XML.
+          content:
+            application/xml:
+              schema:
+                type: string
+              example: '<?xml version="1.0" encoding="UTF-8"?><rsm:CrossIndustryInvoice xmlns:rsm="urn:un:unece:uncefact:data:standard:CrossIndustryInvoice:100">…</rsm:CrossIndustryInvoice>'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: Unknown `check_id`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: not_found
+                message: unknown check_id
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
+        '410':
+          description: The check exists but the XML is no longer stored.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: xml_expired
+                message: the original XML is no longer stored
+        '503':
+          $ref: '#/components/responses/DependencyUnavailable'
+  /v1/decisions:
+    post:
+      tags: [decisions]
+      operationId: postDecision
+      summary: Store the agent-stage decision for a medium case
+      description: |
+        §5.4, FR-06. Field rules (validated before any database access):
+
+        | Field | Rule |
+        | --- | --- |
+        | `check_id` | required, not blank |
+        | `decision` | `approved` \| `rejected` |
+        | `reason_type` | required for `rejected` (`risk` \| `formal`); must be `null` or absent for `approved` |
+        | `block_wallet` | default `false`; `true` only for `rejected` + `risk` |
+        | `decline_reasons` | `rejected`: 1–10 entries, `id` and `text` not blank, `text` and `evidence` at most 500 characters each, `text` must not contain `betrug` or `fraud` (case-insensitive); `approved`: empty or absent |
+
+        One transaction with `SELECT … FOR UPDATE` on the `invoices` row:
+        1. no `invoices` row → 404; 2. `initial_band ≠ medium` → `409 not_pending`;
+        3. already decided: an identical request (same `decision`, `reason_type`, `block_wallet` and
+        `decline_reasons` in the same order) → `200` with the stored state (idempotent), otherwise
+        `409 already_decided`; 4. store; 5. update wallet/pair/supplier counters; 6. block the wallet if
+        `block_wallet` (`block_reason = AGENT_DECISION`).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DecisionRequest'
+            examples:
+              rejected_risk:
+                value:
+                  check_id: chk_01JBX7ZQ8V3K6M2N4P5R7S9T0W
+                  decision: rejected
+                  reason_type: risk
+                  block_wallet: true
+                  decline_reasons:
+                    - id: S-3
+                      text: Die Zahlungsadresse weicht von allen bisherigen Rechnungen dieses Rechnungsstellers ab.
+                      evidence: supplier approved 6x, never with this wallet
+              approved:
+                value:
+                  check_id: chk_01JBX7ZQ8V3K6M2N4P5R7S9T0W
+                  decision: approved
+                  reason_type: null
+                  block_wallet: false
+                  decline_reasons: []
+      responses:
+        '200':
+          description: Decision stored, or the identical decision was already stored.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DecisionResponse'
+              example:
+                check_id: chk_01JBX7ZQ8V3K6M2N4P5R7S9T0W
+                final_decision: rejected
+                final_reason_type: risk
+                decided_by: agents
+                decided_at: '2026-10-30T12:05:00Z'
+        '400':
+          description: |
+            `invalid_request`: body not JSON, wrong types, missing or unknown fields, or a field rule above is
+            violated (the message names the rule). `forbidden_wording`: a `decline_reasons[].text` contains
+            `betrug` or `fraud`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                invalid_request:
+                  value:
+                    error: invalid_request
+                    message: reason_type is required for rejected
+                forbidden_wording:
+                  value:
+                    error: forbidden_wording
+                    message: decline_reasons[].text must not contain forbidden wording
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: Unknown `check_id`, or no `invoices` row for this check.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: not_found
+                message: unknown check_id or no invoice row for this check
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
+        '409':
+          description: |
+            `not_pending`: the check's band is not `medium`. `already_decided`: a different decision is stored.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                not_pending:
+                  value:
+                    error: not_pending
+                    message: the check is not a pending medium case
+                already_decided:
+                  value:
+                    error: already_decided
+                    message: a different decision is already stored
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '503':
+          $ref: '#/components/responses/DependencyUnavailable'
+  /v1/payouts/authorize:
+    post:
+      tags: [payouts]
+      operationId: authorizePayout
+      summary: Authorize a payout for an approved invoice
+      description: |
+        §12.4, FR-32a. Runs under `pg_advisory_xact_lock`; rules are checked in this order, the first violated rule
+        answers `409` with its code:
+
+        | # | Rule | Code |
+        | --- | --- | --- |
+        | – | `ADA_PER_EUR` is set | `payouts_disabled` |
+        | 1 | an `invoices` row exists and `final_decision = approved` | `not_approved` |
+        | 2 | `currency = EUR` | `currency_not_supported` |
+        | 3 | no intent exists for this `invoice_hash`; if one exists → `200` with it, in any state (idempotent) | – |
+        | 4 | the wallet is not blocked (re-read) | `wallet_blocked` |
+        | 5 | XML still in Redis; BT-84 passes §3.4 and hashes to the approved `wallet_hash` | `xml_expired` / `recipient_mismatch` |
+        | 6 | `lovelace = floor(BT-115 × ADA_PER_EUR × 1e6)` is > 0 and ≤ `PAYOUT_MAX_ADA_PER_INVOICE × 1e6` | `amount_zero` / `over_invoice_cap` |
+        | 7 | today's (UTC) non-failed intents + this one ≤ `PAYOUT_MAX_ADA_PER_DAY × 1e6` | `over_daily_cap` |
+        | 8 | `EXPECTED_NETWORK = preprod` | `network_not_allowed` |
+
+        Note: `xml_expired` is a `409` here (policy refusal), unlike `GET /v1/checks/{check_id}/xml` (`410`).
+        On success a new intent in state `authorized` is created.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AuthorizePayoutRequest'
+            example:
+              check_id: chk_01JBX7ZQ8V3K6M2N4P5R7S9T0W
+      responses:
+        '200':
+          $ref: '#/components/responses/PayoutIntent'
+        '400':
+          $ref: '#/components/responses/InvalidRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
+        '409':
+          description: Policy refusal (§12.7); no intent was created.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                payouts_disabled:
+                  value:
+                    error: payouts_disabled
+                    message: payouts are disabled (ADA_PER_EUR is not set)
+                not_approved:
+                  value:
+                    error: not_approved
+                    message: no approved invoice for this check_id
+                currency_not_supported:
+                  value:
+                    error: currency_not_supported
+                    message: only EUR invoices can be paid out
+                wallet_blocked:
+                  value:
+                    error: wallet_blocked
+                    message: the recipient wallet is blocked
+                xml_expired:
+                  value:
+                    error: xml_expired
+                    message: the original XML is no longer stored
+                recipient_mismatch:
+                  value:
+                    error: recipient_mismatch
+                    message: the stored XML does not name the approved recipient
+                amount_zero:
+                  value:
+                    error: amount_zero
+                    message: the payable amount is zero
+                over_invoice_cap:
+                  value:
+                    error: over_invoice_cap
+                    message: the amount exceeds PAYOUT_MAX_ADA_PER_INVOICE
+                over_daily_cap:
+                  value:
+                    error: over_daily_cap
+                    message: the amount exceeds today's PAYOUT_MAX_ADA_PER_DAY
+                network_not_allowed:
+                  value:
+                    error: network_not_allowed
+                    message: payouts are only allowed on preprod
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '503':
+          $ref: '#/components/responses/PayoutDependencyUnavailable'
+  /v1/payouts/{payout_id}/submitting:
+    parameters:
+      - $ref: '#/components/parameters/PayoutId'
+    post:
+      tags: [payouts]
+      operationId: markPayoutSubmitting
+      summary: authorized → submitting
+      description: |
+        §12.5. Allowed from `authorized`; already `submitting` → `200` (idempotent). Rule 4 is checked again: a
+        wallet blocked since authorization → `409 wallet_blocked`, state stays `authorized`. The payout module
+        signs only after this answer. No request body is read (any body and Content-Type are ignored).
+      responses:
+        '200':
+          $ref: '#/components/responses/PayoutIntent'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/PayoutNotFound'
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
+        '409':
+          description: '`invalid_state` (not `authorized`/`submitting`) or `wallet_blocked`.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                invalid_state:
+                  $ref: '#/components/examples/InvalidState'
+                wallet_blocked:
+                  value:
+                    error: wallet_blocked
+                    message: the recipient wallet is blocked
+        '503':
+          $ref: '#/components/responses/PayoutDependencyUnavailable'
+  /v1/payouts/{payout_id}/submitted:
+    parameters:
+      - $ref: '#/components/parameters/PayoutId'
+    post:
+      tags: [payouts]
+      operationId: markPayoutSubmitted
+      summary: submitting | unknown → submitted
+      description: |
+        §12.5. Records the submitted transaction. Allowed from `submitting` and `unknown` (after manual inspection
+        of a stale submission). Already `submitted` with the same `tx_hash` → `200` (idempotent); `submitted` with
+        a different `tx_hash` or any other state → `409 invalid_state`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SubmittedRequest'
+            example:
+              tx_hash: 7e1d3c5b9a0f2e4d6c8b0a1f3e5d7c9b2a4f6e8d0c1b3a5f7e9d2c4b6a8f0e1d
+      responses:
+        '200':
+          $ref: '#/components/responses/PayoutIntent'
+        '400':
+          description: '`invalid_request`: body not JSON, unknown fields, or `tx_hash` not 64 lowercase hex characters.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: invalid_request
+                message: tx_hash must be 64 lowercase hex characters
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/PayoutNotFound'
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
+        '409':
+          $ref: '#/components/responses/InvalidState'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '503':
+          $ref: '#/components/responses/PayoutDependencyUnavailable'
+  /v1/payouts/{payout_id}/confirm:
+    parameters:
+      - $ref: '#/components/parameters/PayoutId'
+    post:
+      tags: [payouts]
+      operationId: confirmPayout
+      summary: submitted → confirmed (server-side on-chain check)
+      description: |
+        §12.5. The server itself queries `GET <BLOCKFROST_BASE_URL>/txs/<tx_hash>/utxos` (no cache, no retry,
+        `HTTP_TIMEOUT_MS`). Requires `BLOCKFROST_MODE=api`; in `mock` mode → `503`. Already `confirmed` → `200`.
+
+        | Blockfrost | Result |
+        | --- | --- |
+        | 200 with an output paying exactly `to_address` at least `lovelace` lovelace | `confirmed`, `200` |
+        | 200 without such an output | `409 tx_mismatch`, state becomes `unknown` |
+        | 404 (not yet in a block) | `409 tx_not_found`, state stays `submitted`; retry later |
+        | anything else, timeout, invalid JSON | `503 dependency_unavailable`, state stays `submitted` |
+
+        No request body is read.
+      responses:
+        '200':
+          $ref: '#/components/responses/PayoutIntent'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/PayoutNotFound'
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
+        '409':
+          description: '`invalid_state` (not `submitted`/`confirmed`), `tx_not_found` or `tx_mismatch`.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                invalid_state:
+                  $ref: '#/components/examples/InvalidState'
+                tx_not_found:
+                  value:
+                    error: tx_not_found
+                    message: the transaction is not yet in a block
+                tx_mismatch:
+                  value:
+                    error: tx_mismatch
+                    message: the transaction has no output paying the authorized amount to the recipient
+        '503':
+          $ref: '#/components/responses/PayoutDependencyUnavailable'
+  /v1/payouts/{payout_id}/failed:
+    parameters:
+      - $ref: '#/components/parameters/PayoutId'
+    post:
+      tags: [payouts]
+      operationId: markPayoutFailed
+      summary: authorized → failed
+      description: |
+        §12.5. Only from `authorized` (from `submitting` on, a failure can no longer be established safely).
+        Already `failed` → `200`. No request body is read.
+      responses:
+        '200':
+          $ref: '#/components/responses/PayoutIntent'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/PayoutNotFound'
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
+        '409':
+          $ref: '#/components/responses/InvalidState'
+        '503':
+          $ref: '#/components/responses/PayoutDependencyUnavailable'
+  /v1/suppliers/{supplier_hash}/history:
+    parameters:
+      - name: supplier_hash
+        in: path
+        required: true
+        description: '`hmac:` + 64 lowercase hex characters (§3.3). The colon may be sent raw or as `%3A`.'
+        schema:
+          type: string
+          pattern: '^hmac:[0-9a-f]{64}$'
+        example: hmac:c3e85a1f60d27b94e4a03c18f7b62d95a0e4c71b38f5d26e9a14c07b5f3e82d6
+    get:
+      tags: [suppliers]
+      operationId: getSupplierHistory
+      summary: Approval history of one supplier
+      description: |
+        §12.6. Only counts, EUR amounts and a date, never raw values. Evaluates `invoices` rows with
+        `final_decision = approved` and `currency = EUR`, newest first (`issue_date` DESC, then `created_at` DESC).
+        A supplier that has invoices but none approved in EUR answers `200` with `approved_count: 0`.
+      responses:
+        '200':
+          description: History.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SupplierHistory'
+              example:
+                supplier_hash: hmac:c3e85a1f60d27b94e4a03c18f7b62d95a0e4c71b38f5d26e9a14c07b5f3e82d6
+                approved_count: 6
+                median_eur: '1145.00'
+                last_amounts: ['1050.00', '1300.00', '1100.00', '980.00', '1250.00', '1190.00']
+                first_seen: '2026-04-15'
+        '400':
+          description: '`supplier_hash` is not `hmac:` + 64 lowercase hex characters.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: invalid_request
+                message: 'supplier_hash must be hmac: followed by 64 lowercase hex characters'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: No `invoices` row with this `supplier_hash`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: not_found
+                message: no invoice for this supplier_hash
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
+        '503':
+          $ref: '#/components/responses/DependencyUnavailable'
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: |
+        `Authorization: Bearer <SNIFFER_API_TOKEN>` (FR-08). Constant-time comparison; the prefix must be exactly
+        `Bearer ` (case-sensitive). Missing or wrong → `401 unauthorized`.
+  parameters:
+    CheckId:
+      name: check_id
+      in: path
+      required: true
+      description: '`chk_` + ULID (§4). Not format-checked by the server; anything unknown is 404.'
+      schema:
+        type: string
+      example: chk_01JBX7ZQ8V3K6M2N4P5R7S9T0W
+    PayoutId:
+      name: payout_id
+      in: path
+      required: true
+      description: '`pay_` + ULID (§12.4). Not format-checked; unknown IDs are 404.'
+      schema:
+        type: string
+      example: pay_01JC2M4N6P8Q0R2S4T6V8W0X2Y
+  examples:
+    InvalidState:
+      value:
+        error: invalid_state
+        message: this state transition is not allowed for the payout
+    CheckResultMedium:
+      summary: Spec §4 example (medium band), as round-tripped in `backend/src/model.rs` tests
+      value: &checkResultMedium
+        schema_version: '1.0'
+        check_id: chk_01JBX7ZQ8V3K6M2N4P5R7S9T0W
+        checked_at: '2026-10-30T12:00:00Z'
+        engine:
+          version: 1.0.0
+          config_sha256: 5b2f8e4a1c97d03e6a84f1b52c9e07d3a6f48b1e2c95d07a3f6e81b4c2d97a05
+        summary:
+          band: medium
+          decision: review
+          final: false
+          reason_type: null
+          risk_score: 58
+          ko_triggered: false
+          decline_reasons: []
+          checks_incomplete: []
+          checks_skipped: []
+        invoice:
+          invoice_hash: hmac:4f1c9a0e7b2d58c3a6e91f04b7d2c85e3a90f6b1d4c7e28a5b03f96d1e4c7a20
+          xml_ref: /v1/checks/chk_01JBX7ZQ8V3K6M2N4P5R7S9T0W/xml
+          profile: urn:cen.eu:en16931:2017#compliant#urn:xeinkauf.de:kosit:xrechnung_3.0
+          validation:
+            tool: mustang
+            tool_version: 2.26.0
+            status: valid
+            errors: 0
+            error_rules: []
+            whitelisted_rules: []
+          invoice_number: RE-2026-0412
+          type_code: '380'
+          issue_date: '2026-10-28'
+          due_date: '2026-10-30'
+          total:
+            amount: '833.00'
+            currency: EUR
+          due_payable:
+            amount: '833.00'
+            currency: EUR
+          payment:
+            means_code: ZZZ
+            network: preprod
+            asset: ADA
+            address_type: base
+            credential_type: key
+            address_hash: hmac:9b7e2c41d08f6a35e1c94b70f2d83a6c5e19b04f7a2d6c83e5f01b94d7a2c6e1
+            wallet_hash: hmac:2d6a9f13c8e04b75a1f39c62e8d05b47f3a1c96e0d84b27a5c3f19e60b8d4a73
+          order_reference: PO-2026-001
+        supplier:
+          supplier_hash: hmac:c3e85a1f60d27b94e4a03c18f7b62d95a0e4c71b38f5d26e9a14c07b5f3e82d6
+          country: DE
+          vat_country: DE
+          vat_valid: true
+          known: true
+          approved: 6
+          trust: 0.545
+          blocked: false
+          first_invoice: false
+        wallet:
+          wallet_hash: hmac:2d6a9f13c8e04b75a1f39c62e8d05b47f3a1c96e0d84b27a5c3f19e60b8d4a73
+          known: false
+          approved: 0
+          rejected_risk: 0
+          trust: 0.0
+          blocked: false
+          has_transactions: true
+          first_tx_at: '2026-10-27T12:00:00Z'
+          age_days: 3
+          chainabuse:
+            reports: 0
+            trusted_or_checked: 0
+        pair:
+          pair_hash: hmac:7a04d1e95c3b28f6a9e17d40c5b3f82e6d19a07c4b5e3f28d60a91c7e4b2f5d8
+          approved: 0
+          rejected_risk: 0
+        signature:
+          status: absent
+          scheme: null
+          key_hash: null
+          matches_known_key: null
+        criteria:
+          - id: S-3
+            name: Known supplier, new wallet
+            points: 25
+            evidence: supplier approved 6x, never with this wallet
+            agent: wallet
+          - id: W-2
+            name: Young address
+            points: 15
+            evidence: first transaction 2026-10-27, 3 days before check
+            agent: wallet
+          - id: I-5
+            name: Pressure wording
+            points: 10
+            evidence: 'pressure wording: dringend, neue wallet'
+            agent: invoice
+          - id: I-7
+            name: Due date < 3 days
+            points: 8
+            evidence: BT-2 2026-10-28, BT-9 2026-10-30 (2 days)
+            agent: invoice
+        reducers: []
+        agent_tasks:
+          invoice:
+            - source: I-5
+              task: Prüfe, warum die Rechnung zu schneller Zahlung drängt.
+            - source: I-7
+              task: Prüfe, ob ein Zahlungsziel unter 3 Tagen mit dem Rechnungssteller vereinbart ist.
+          wallet:
+            - source: S-3
+              task: Prüfe, ob der Rechnungssteller die neue Zahlungsadresse über einen unabhängigen, bereits bekannten Kanal bestätigt hat.
+            - source: W-2
+              task: Prüfe, warum eine sehr neue Zahlungsadresse verwendet wird.
+          research: []
+    CheckViewDecided:
+      summary: Medium case decided by the agents (§5.2)
+      value:
+        result: *checkResultMedium
+        decision_state:
+          final_decision: approved
+          final_reason_type: null
+          final_block_wallet: false
+          final_decline_reasons: null
+          decided_by: agents
+          decided_at: '2026-10-30T12:05:00Z'
+    CheckViewOpen:
+      summary: Medium case still open (all decision columns null)
+      value:
+        result: *checkResultMedium
+        decision_state:
+          final_decision: null
+          final_reason_type: null
+          final_block_wallet: null
+          final_decline_reasons: null
+          decided_by: null
+          decided_at: null
+  responses:
+    Unauthorized:
+      description: Missing or wrong bearer token (FR-08).
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error: unauthorized
+            message: missing or invalid bearer token
+    MethodNotAllowed:
+      description: Wrong method on a known path. Generated by axum, not by the service; empty body, no JSON error.
+      headers:
+        Allow:
+          description: Allowed methods, e.g. `POST` or `GET,HEAD`.
+          schema:
+            type: string
+          example: POST
+    InvalidRequest:
+      description: '`invalid_request`: body not JSON, wrong types, missing or unknown fields.'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error: invalid_request
+            message: wrong field types, missing or unknown fields
+    PayloadTooLarge:
+      description: Body exceeds `6 × MAX_XML_BYTES + 4096` bytes.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error: payload_too_large
+            message: request body exceeds the server limit
+    UnsupportedMediaType:
+      description: '`Content-Type` is not `application/json` (parameters such as `charset` are allowed).'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error: unsupported_media_type
+            message: Content-Type must be application/json
+    DependencyUnavailable:
+      description: Postgres or Redis unreachable, or a commit failed; nothing was stored (§5.1).
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error: dependency_unavailable
+            message: a storage dependency is unavailable; nothing was stored
+    PayoutDependencyUnavailable:
+      description: |
+        `dependency_unavailable`. Postgres/Redis errors use the generic message ("a storage dependency is
+        unavailable; nothing was stored"); payout-specific failures (corrupt intent row, Blockfrost unavailable or
+        in mock mode on `/confirm`) use "a dependency is unavailable; the payout was not changed".
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          examples:
+            payout:
+              value:
+                error: dependency_unavailable
+                message: a dependency is unavailable; the payout was not changed
+            storage:
+              value:
+                error: dependency_unavailable
+                message: a storage dependency is unavailable; nothing was stored
+    PayoutNotFound:
+      description: Unknown `payout_id`.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error: not_found
+            message: unknown payout_id
+    InvalidState:
+      description: The state transition is not allowed (§12.5).
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error: invalid_state
+            message: this state transition is not allowed for the payout
+    PayoutIntent:
+      description: The intent view (§12.4), the response of every payout endpoint.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/PayoutIntent'
+          example:
+            payout_id: pay_01JC2M4N6P8Q0R2S4T6V8W0X2Y
+            check_id: chk_01JBX7ZQ8V3K6M2N4P5R7S9T0W
+            state: authorized
+            to_address: addr_test1vqrswpc8qurswpc8qurswpc8qurswpc8qurswpc8qurswpcjw59ta
+            amount_eur: '1190.00'
+            ada_per_eur: '0.040000'
+            lovelace: 47600000
+            tx_hash: null
+  schemas:
+    Error:
+      type: object
+      description: Error body (FR-09). `message` never contains raw invoice data.
+      required: [error, message]
+      additionalProperties: false
+      properties:
+        error:
+          type: string
+          description: Machine-readable code (§5.1, §12.7).
+          examples: [not_found]
+        message:
+          type: string
+          description: Fixed human-readable text.
+    Health:
+      type: object
+      required: [status, postgres, redis, sanctions_list_age_hours]
+      additionalProperties: false
+      properties:
+        status:
+          type: string
+          enum: [ok, degraded]
+        postgres:
+          type: string
+          enum: [ok, error]
+        redis:
+          type: string
+          enum: [ok, error]
+        sanctions_list_age_hours:
+          type: [integer, 'null']
+          description: Whole hours since the last successful OFAC SDN import; `null` without an import or when Postgres is down.
+    InitialCheckRequest:
+      type: object
+      required: [xml]
+      additionalProperties: false
+      properties:
+        xml:
+          type: string
+          description: The invoice XML (CII or UBL), at most `MAX_XML_BYTES` bytes.
+        checked_at:
+          type: [string, 'null']
+          description: |
+            FR-03. Only allowed with `ALLOW_CHECKED_AT=true` (tests); otherwise any non-null value →
+            `400 checked_at_not_allowed`. RFC 3339, converted to UTC and truncated to whole seconds. Default: now.
+          examples: ['2026-10-30T14:00:00+02:00']
+    CheckView:
+      type: object
+      required: [result, decision_state]
+      additionalProperties: false
+      properties:
+        result:
+          $ref: '#/components/schemas/CheckResult'
+        decision_state:
+          oneOf:
+            - type: 'null'
+            - $ref: '#/components/schemas/DecisionState'
+    DecisionState:
+      type: object
+      description: Decision columns of the `invoices` row; all `null` while a medium case is open (§5.2).
+      required: [final_decision, final_reason_type, final_block_wallet, final_decline_reasons, decided_by, decided_at]
+      additionalProperties: false
+      properties:
+        final_decision:
+          oneOf:
+            - type: 'null'
+            - $ref: '#/components/schemas/FinalDecision'
+        final_reason_type:
+          oneOf:
+            - type: 'null'
+            - $ref: '#/components/schemas/ReasonType'
+        final_block_wallet:
+          type: [boolean, 'null']
+        final_decline_reasons:
+          type: [array, 'null']
+          items:
+            $ref: '#/components/schemas/DeclineReason'
+        decided_by:
+          type: [string, 'null']
+          enum: [initial_check, agents, seed, null]
+        decided_at:
+          type: [string, 'null']
+          format: date-time
+          description: RFC 3339 UTC, whole seconds, `Z` suffix.
+    DecisionRequest:
+      type: object
+      required: [check_id, decision]
+      additionalProperties: false
+      properties:
+        check_id:
+          type: string
+          minLength: 1
+        decision:
+          $ref: '#/components/schemas/FinalDecision'
+        reason_type:
+          description: Required for `rejected`; `null` or absent for `approved`.
+          oneOf:
+            - type: 'null'
+            - $ref: '#/components/schemas/ReasonType'
+        block_wallet:
+          type: boolean
+          default: false
+          description: '`true` only for `rejected` + `risk`.'
+        decline_reasons:
+          type: array
+          default: []
+          maxItems: 10
+          description: 1–10 entries for `rejected`; empty or absent for `approved`.
+          items:
+            $ref: '#/components/schemas/DeclineReasonInput'
+    DeclineReasonInput:
+      type: object
+      required: [id, text, evidence]
+      additionalProperties: false
+      properties:
+        id:
+          type: string
+          minLength: 1
+        text:
+          type: string
+          minLength: 1
+          maxLength: 500
+          description: Customer-facing text; must not contain `betrug` or `fraud` (case-insensitive).
+        evidence:
+          type: string
+          maxLength: 500
+    DecisionResponse:
+      type: object
+      required: [check_id, final_decision, final_reason_type, decided_by, decided_at]
+      additionalProperties: false
+      properties:
+        check_id:
+          type: string
+        final_decision:
+          $ref: '#/components/schemas/FinalDecision'
+        final_reason_type:
+          oneOf:
+            - type: 'null'
+            - $ref: '#/components/schemas/ReasonType'
+        decided_by:
+          type: string
+          description: '`agents` for a new decision; the stored value for an idempotent repeat.'
+          enum: [initial_check, agents, seed]
+        decided_at:
+          type: string
+          format: date-time
+          description: RFC 3339 UTC, whole seconds, `Z` suffix.
+    FinalDecision:
+      type: string
+      enum: [approved, rejected]
+    ReasonType:
+      type: string
+      enum: [formal, risk]
+    AuthorizePayoutRequest:
+      type: object
+      required: [check_id]
+      additionalProperties: false
+      properties:
+        check_id:
+          type: string
+    SubmittedRequest:
+      type: object
+      required: [tx_hash]
+      additionalProperties: false
+      properties:
+        tx_hash:
+          type: string
+          pattern: '^[0-9a-f]{64}$'
+    PayoutIntent:
+      type: object
+      description: Intent view (§12.4). `to_address` is the only raw value the service stores (FR-32a).
+      required: [payout_id, check_id, state, to_address, amount_eur, ada_per_eur, lovelace, tx_hash]
+      additionalProperties: false
+      properties:
+        payout_id:
+          type: string
+          description: '`pay_` + ULID.'
+        check_id:
+          type: string
+        state:
+          type: string
+          description: |
+            §12.5: `authorized → submitting → submitted → confirmed`; `authorized → failed`;
+            `submitting → unknown` (background job after 600 s); `submitted → unknown` (`tx_mismatch`);
+            `unknown → submitted` (manual, via `/submitted`).
+          enum: [authorized, submitting, submitted, confirmed, failed, unknown]
+        to_address:
+          type: string
+          description: Recipient bech32 address from BT-84 of the stored XML.
+        amount_eur:
+          type: string
+          description: Exactly 2 decimals.
+          pattern: '^-?[0-9]+\.[0-9]{2}$'
+        ada_per_eur:
+          type: string
+          description: Exactly 6 decimals.
+          pattern: '^-?[0-9]+\.[0-9]{6}$'
+        lovelace:
+          type: integer
+          format: int64
+        tx_hash:
+          type: [string, 'null']
+          pattern: '^[0-9a-f]{64}$'
+    SupplierHistory:
+      type: object
+      required: [supplier_hash, approved_count, median_eur, last_amounts, first_seen]
+      additionalProperties: false
+      properties:
+        supplier_hash:
+          type: string
+          pattern: '^hmac:[0-9a-f]{64}$'
+        approved_count:
+          type: integer
+          minimum: 0
+        median_eur:
+          type: [string, 'null']
+          description: Median of all evaluated amounts (2 decimals); `null` when `approved_count` is 0.
+        last_amounts:
+          type: array
+          maxItems: 6
+          description: At most 6 amounts, newest first, 2 decimals each.
+          items:
+            type: string
+        first_seen:
+          type: [string, 'null']
+          format: date
+          description: Earliest `issue_date` (`YYYY-MM-DD`); `null` when `approved_count` is 0.
+    DeclineReason:
+      type: object
+      required: [id, text, evidence]
+      properties:
+        id:
+          type: string
+        text:
+          type: string
+        evidence:
+          type: string
+    Amount:
+      type: object
+      required: [amount, currency]
+      properties:
+        amount:
+          type: string
+          description: Decimal string with exactly 2 decimals.
+          pattern: '^-?[0-9]+\.[0-9]{2}$'
+        currency:
+          type: string
+          examples: [EUR]
+    CheckResult:
+      type: object
+      description: |
+        Result JSON, schema version 1.0 (§4). Nullable fields are serialized as `null`, never omitted. Consumers
+        must ignore unknown fields (new fields raise the minor version). `criteria[].id`, `reducers[].id` and
+        `agent_tasks.*[].source` are free strings, not a fixed list.
+      required: [schema_version, check_id, checked_at, engine, summary, invoice, supplier, wallet, pair, signature, criteria, reducers, agent_tasks]
+      properties:
+        schema_version:
+          type: string
+          examples: ['1.0']
+        check_id:
+          type: string
+          description: '`chk_` + ULID.'
+        checked_at:
+          type: string
+          format: date-time
+          description: RFC 3339 UTC, whole seconds, `Z` suffix.
+        engine:
+          type: object
+          required: [version, config_sha256]
+          properties:
+            version:
+              type: string
+              description: Package version from `Cargo.toml`.
+            config_sha256:
+              type: string
+              description: SHA-256 (hex) of `config/criteria.json`.
+        summary:
+          $ref: '#/components/schemas/Summary'
+        invoice:
+          description: '`null` only for unparsable XML or a wrong root element.'
+          oneOf:
+            - type: 'null'
+            - $ref: '#/components/schemas/InvoiceOut'
+        supplier:
+          description: '`null` when no `supplier_hash` could be computed.'
+          oneOf:
+            - type: 'null'
+            - $ref: '#/components/schemas/SupplierOut'
+        wallet:
+          description: '`null` when no `wallet_hash` could be computed.'
+          oneOf:
+            - type: 'null'
+            - $ref: '#/components/schemas/WalletOut'
+        pair:
+          description: '`null` when no `pair_hash` could be computed.'
+          oneOf:
+            - type: 'null'
+            - type: object
+              required: [pair_hash, approved, rejected_risk]
+              properties:
+                pair_hash:
+                  type: string
+                approved:
+                  type: integer
+                rejected_risk:
+                  type: integer
+        signature:
+          description: '`null` only when `invoice` is `null`. v1.0 emits only `absent` / `present_unverified`; the rest is reserved (§11).'
+          oneOf:
+            - type: 'null'
+            - type: object
+              required: [status, scheme, key_hash, matches_known_key]
+              properties:
+                status:
+                  type: string
+                  enum: [absent, present_unverified, valid, invalid, foreign_key]
+                scheme:
+                  type: [string, 'null']
+                key_hash:
+                  type: [string, 'null']
+                matches_known_key:
+                  type: [boolean, 'null']
+        criteria:
+          type: array
+          items:
+            type: object
+            required: [id, name, points, evidence, agent]
+            properties:
+              id:
+                type: string
+              name:
+                type: string
+              points:
+                type: integer
+              evidence:
+                type: string
+              agent:
+                $ref: '#/components/schemas/Agent'
+        reducers:
+          type: array
+          items:
+            type: object
+            required: [id, name, points, evidence]
+            properties:
+              id:
+                type: string
+              name:
+                type: string
+              points:
+                type: integer
+              evidence:
+                type: string
+        agent_tasks:
+          type: object
+          description: Always all three keys. `research` is served by the Supplier Investigator (§4).
+          required: [invoice, wallet, research]
+          properties:
+            invoice:
+              type: array
+              items:
+                $ref: '#/components/schemas/AgentTask'
+            wallet:
+              type: array
+              items:
+                $ref: '#/components/schemas/AgentTask'
+            research:
+              type: array
+              items:
+                $ref: '#/components/schemas/AgentTask'
+    Agent:
+      type: string
+      enum: [invoice, wallet, research]
+    AgentTask:
+      type: object
+      required: [source, task]
+      properties:
+        source:
+          type: string
+          description: Criterion ID or `checks_incomplete` code that produced the task.
+        task:
+          type: string
+    Summary:
+      type: object
+      required: [band, decision, final, reason_type, risk_score, ko_triggered, decline_reasons, checks_incomplete, checks_skipped]
+      properties:
+        band:
+          type: string
+          enum: [low, medium, high]
+        decision:
+          type: string
+          enum: [approve, review, decline]
+        final:
+          type: boolean
+          description: '`true` for `low` and `high`.'
+        reason_type:
+          description: '`risk` | `formal` for `high`, otherwise `null`.'
+          oneOf:
+            - type: 'null'
+            - $ref: '#/components/schemas/ReasonType'
+        risk_score:
+          type: integer
+          minimum: 0
+          maximum: 100
+        ko_triggered:
+          type: boolean
+        decline_reasons:
+          type: array
+          items:
+            $ref: '#/components/schemas/DeclineReason'
+        checks_incomplete:
+          type: array
+          description: Sorted codes, e.g. `BLOCKFROST_UNAVAILABLE`, `CHAINABUSE_UNAVAILABLE`, `CURRENCY_NOT_EUR`, `MUSTANG_UNAVAILABLE`, `SANCTIONS_LIST_STALE`, `VIES_UNAVAILABLE`.
+          items:
+            type: string
+        checks_skipped:
+          type: array
+          items:
+            type: object
+            required: [source, reason]
+            properties:
+              source:
+                type: string
+                enum: [MUSTANG, BLOCKFROST, VIES, CHAINABUSE]
+              reason:
+                type: string
+                enum: [ko, not_applicable]
+    InvoiceOut:
+      type: object
+      required: [invoice_hash, xml_ref, profile, validation, invoice_number, type_code, issue_date, due_date, total, due_payable, payment, order_reference]
+      properties:
+        invoice_hash:
+          type: [string, 'null']
+        xml_ref:
+          type: string
+          description: '`/v1/checks/<check_id>/xml`.'
+        profile:
+          type: [string, 'null']
+          description: BT-24.
+        validation:
+          type: object
+          required: [tool, tool_version, status, errors, error_rules, whitelisted_rules]
+          properties:
+            tool:
+              type: string
+              const: mustang
+            tool_version:
+              type: [string, 'null']
+            status:
+              type: string
+              enum: [valid, invalid, unavailable, 'off']
+            errors:
+              type: integer
+              minimum: 0
+              description: Number of non-whitelisted errors.
+            error_rules:
+              type: array
+              items:
+                type: string
+            whitelisted_rules:
+              type: array
+              items:
+                type: string
+        invoice_number:
+          type: [string, 'null']
+          description: BT-1, trimmed.
+        type_code:
+          type: [string, 'null']
+          description: BT-3.
+        issue_date:
+          type: [string, 'null']
+          format: date
+        due_date:
+          type: [string, 'null']
+          format: date
+        total:
+          oneOf:
+            - type: 'null'
+            - $ref: '#/components/schemas/Amount'
+        due_payable:
+          oneOf:
+            - type: 'null'
+            - $ref: '#/components/schemas/Amount'
+        payment:
+          type: object
+          required: [means_code, network, asset, address_type, credential_type, address_hash, wallet_hash]
+          properties:
+            means_code:
+              type: [string, 'null']
+              description: BT-81.
+            network:
+              type: [string, 'null']
+              description: '`EXPECTED_NETWORK` when the address is valid.'
+            asset:
+              type: [string, 'null']
+            address_type:
+              type: [string, 'null']
+              enum: [base, enterprise, null]
+            credential_type:
+              type: [string, 'null']
+              enum: [key, script, null]
+            address_hash:
+              type: [string, 'null']
+            wallet_hash:
+              type: [string, 'null']
+        order_reference:
+          type: [string, 'null']
+          description: BT-13, trimmed.
+    SupplierOut:
+      type: object
+      required: [supplier_hash, country, vat_country, vat_valid, known, approved, trust, blocked, first_invoice]
+      properties:
+        supplier_hash:
+          type: string
+        country:
+          type: [string, 'null']
+          description: BT-40.
+        vat_country:
+          type: string
+        vat_valid:
+          type: [boolean, 'null']
+        known:
+          type: boolean
+        approved:
+          type: integer
+        trust:
+          type: number
+          minimum: -1
+          maximum: 1
+          description: At most 3 decimals.
+        blocked:
+          type: boolean
+        first_invoice:
+          type: [boolean, 'null']
+    WalletOut:
+      type: object
+      required: [wallet_hash, known, approved, rejected_risk, trust, blocked, has_transactions, first_tx_at, age_days, chainabuse]
+      properties:
+        wallet_hash:
+          type: string
+        known:
+          type: boolean
+        approved:
+          type: integer
+        rejected_risk:
+          type: integer
+        trust:
+          type: number
+          minimum: -1
+          maximum: 1
+        blocked:
+          type: boolean
+        has_transactions:
+          type: [boolean, 'null']
+        first_tx_at:
+          type: [string, 'null']
+          format: date-time
+        age_days:
+          type: [integer, 'null']
+        chainabuse:
+          oneOf:
+            - type: 'null'
+            - type: object
+              required: [reports, trusted_or_checked]
+              properties:
+                reports:
+                  type: integer
+                  minimum: 0
+                trusted_or_checked:
+                  type: integer
+                  minimum: 0
