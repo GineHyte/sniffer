@@ -42,10 +42,24 @@ export function buildInvestigatorInput({case_id,role,tasks,data}){
  return {input:parsed.data,text};
 }
 
+// Sokosumi prepends the Workspace design document to stored task descriptions (measured on Preprod 2026-10-31):
+// `[DESIGN.md](https://…)\n\n<original text>`. Only whole lines that are each one https Markdown link, followed by
+// at least one blank line, are removed; anything else is returned unchanged so the JSON check still fails closed.
+export const MAX_DESCRIPTION_PREFIX_CHARS=2000;
+const DESCRIPTION_PREFIX_REGEX=/^(?:[ \t]*\[[^\[\]\r\n]+\]\(https:\/\/[^\s()]+\)[ \t]*\r?\n)+(?:[ \t]*\r?\n)+/;
+export function stripDescriptionPrefix(text){
+ if(typeof text!=='string')return text;
+ const match=DESCRIPTION_PREFIX_REGEX.exec(text);
+ return match&&match[0].length<=MAX_DESCRIPTION_PREFIX_CHARS?text.slice(match[0].length):text;
+}
+
 export function parseInvestigatorInput(text,expectedRole){
- if(typeof text!=='string'||!text.trim()||text.length>MAX_INPUT_CHARS)throw new Error(`Task description must contain 1 to ${MAX_INPUT_CHARS} characters`);
+ const sizeError=()=>new Error(`Task description must contain 1 to ${MAX_INPUT_CHARS} characters`);
+ if(typeof text!=='string'||text.length>MAX_INPUT_CHARS+MAX_DESCRIPTION_PREFIX_CHARS)throw sizeError();
+ const body=stripDescriptionPrefix(text);
+ if(!body.trim()||body.length>MAX_INPUT_CHARS)throw sizeError();
  let value;
- try{value=JSON.parse(text)}catch{throw new Error('Task description is not JSON')}
+ try{value=JSON.parse(body)}catch{throw new Error('Task description is not JSON')}
  const parsed=InvestigatorInput.safeParse(value);
  if(!parsed.success)throw new Error(`Invalid investigator input: ${parsed.error.issues.map(i=>`${i.path.join('.')||'(root)'}: ${i.message}`).join('; ').slice(0,400)}`);
  if(expectedRole!==undefined&&parsed.data.role!==expectedRole)throw new Error(`Task is for role ${parsed.data.role}, not ${expectedRole}`);

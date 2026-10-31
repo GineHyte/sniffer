@@ -7,7 +7,7 @@
 //  - `tasks list --coworker-id ID --limit N --json` prints {tasks:[parseTask(...)]} with id, name, description, status,
 //    coworkerId (or assigneeId), createdAt, … from the first page of GET /v1/tasks?coworkerId=&take=
 //    (dist/src/cli/commands/tasks.js runTasksCommand "list", dist/src/api/services/task-service.js fetchTasks).
-import {assertTaskId,TASK_ID_REGEX} from '../investigator/contract.mjs';
+import {assertTaskId,TASK_ID_REGEX,stripDescriptionPrefix} from '../investigator/contract.mjs';
 
 export const FAILED_STATUSES=new Set(['FAILED','CANCELED','CANCELLED','ERROR','REJECTED']);
 
@@ -34,13 +34,13 @@ export const TASK_CHECK_LIMIT=100;
 
 const taskIdInDescription=description=>{
  if(typeof description!=='string')return undefined;
- try{const value=JSON.parse(description);return typeof value?.task_id==='string'?value.task_id:undefined;}catch{return undefined;}
+ try{const value=JSON.parse(stripDescriptionPrefix(description));return typeof value?.task_id==='string'?value.task_id:undefined;}catch{return undefined;}
 };
 
 /**
  * Read-only check whether an investigator task for (case, role) exists after a failed or interrupted create.
  * A listed task matches when its name is the expected name, its description is the exact text, or the JSON
- * description carries the logical task_id `<case_id>-<role>`. Uses `tasks list --coworker-id … --limit …` and,
+ * description carries the logical task_id `<case_id>-<role>`. A Workspace design-doc link prefix is ignored. Uses `tasks list --coworker-id … --limit …` and,
  * when a single match lacks its Coworker ID, `tasks get` to confirm the assignee.
  * @returns {Promise<{outcome:'found',task_id:string,listed:number}|{outcome:'none',listed:number}|{outcome:'ambiguous'|'check_failed',reason:string,listed?:number,matches?:string[]}>}
  */
@@ -51,7 +51,7 @@ export async function findCreatedTask({run,coworkerId,taskArgs=[],name,descripti
  const tasks=out?.tasks;
  if(!Array.isArray(tasks))return {outcome:'check_failed',reason:'list_response_invalid'};
  const listed=tasks.length;
- const isMatch=task=>task&&typeof task==='object'&&(task.name===name||task.description===description||taskIdInDescription(task.description)===logicalTaskId);
+ const isMatch=task=>task&&typeof task==='object'&&(task.name===name||stripDescriptionPrefix(task.description)===description||taskIdInDescription(task.description)===logicalTaskId);
  const matches=tasks.filter(isMatch);
  const ids=matches.map(task=>String(task.id));
  if(matches.length>1)return {outcome:'ambiguous',reason:'multiple_matches',listed,matches:ids};
