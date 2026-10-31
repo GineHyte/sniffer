@@ -40,6 +40,16 @@ Overall: **about 85%.** All code tasks through T27 are done: Rust backend (Initi
 | T27 (0624459) | `payout/transfer.mjs` (Evolution SDK). Never resubmits. `.local/payout.env` format: `PAYOUT_MNEMONIC="<24 words>"` + optional `PAYOUT_ACCOUNT_INDEX` (T28 creates it). The local journal claim does not stop two machines from paying one intent. |
 | Tests now | `cargo test`: lib 298, acceptance 32 (+2 ignored), cli_it 1, decisions_it 7, history_it 2, payouts_it 18, store_it 2. Clippy and fmt clean. `npm test` 100/100. |
 
+## T28 live provisioning (IN PROGRESS 2026-10-31)
+User choices: **organization** Workspace; generated local secrets; Postgres keeps `throwaway-test` (local only).
+Done (local only, no network writes):
+- `.local/sniffer-secrets.env`: random `SNIFFER_API_TOKEN`, `SNIFFER_HMAC_KEY` (32-byte hex), `POSTGRES_PASSWORD=throwaway-test`. Never print.
+- `.local/payout.env`: fresh payout mnemonic. Payout address `addr_test1qpn7t2trak0rlsush4237ysa4yuu48265r9m5fug8jkup0z0929498cxn7fstduw8s53wzy5awsl03t6vqzrf500l89qr44l92`.
+- Wallets in `.local/x402/`: `main-payer` `addr_test1qpaj66hl86xrt258lmxsf403nh04q76fs9s3tssr78h7qjkqzpn22xxu94p0zqcp9tw986p8neruzual0lp33n5vnwhsedn75p`, `intake` `addr_test1qzpdqn7hv5wdyfw76ay7c5vu92xad6d2s0sw4ggpcgdm2qn9jnsryv05ec04fclqtsh3rnhdetpysf2pmtgmqvnpxwpsv5h8sk`, `inv-invoice`, `inv-wallet`, `inv-supplier` (addresses in `.local/live.env`). The x402 `payer` wallet (~99 tADA) acts as the test customer.
+- `.local/live.env`: non-secret settings (addresses, prices 1 tADA, `ADA_PER_EUR=0.001`, caps 10/50 ADA, ports, Eve URLs). npm scripts and compose load it (063ee2c); `npm run stack` starts the compose stack with all env files.
+Waiting on the user: `sokosumi --preprod auth login`; `AGENT_AUTHOR` and `ZAI_API_KEY`/`ZAI_BASE_URL`/`ZAI_MODEL` in `.env`; faucet funds for `main-payer` and the payout wallet.
+Then (each step asks first): discover account/org/Vendor → Vendor (create only if none) → 3 Coworkers → connect to the org (needs GRANTED) → per-Coworker runtime key (`coworkers api-key` + `runtime key-import`, OS vault) → write IDs into `.local/live.env`.
+
 ## Wave 7 (DONE 2026-10-31; pushed to origin/main). Next: T28 live provisioning, T29 E2E demo, T30 verify/review/README.
 Wave 6 (T19, T20, T22, T27) is done and committed.
 Shared interface written by the main session first (376cd4d): `investigator/contract.mjs` (task description schema, `task_id = <case_id>-<role>`, Sokosumi task ID check, `/pay/{taskId}` path) and `sokosumi-cli.mjs` (CLI JS entry via `process.execPath`, no shell). `package.json` test script already globs `investigator/` and `main/`, so agents do not edit it.
