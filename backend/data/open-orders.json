@@ -1,2 +1,7 @@
-[ { "order_id": "PO-2026-001", "supplier_vat_id": "DE111111111" },
-  { "order_id": "PO-2026-002", "supplier_vat_id": "DE222222222" } ]
+[ { "order_id": "PO-2026-001", "supplier_vat_id": "DE111111111", "ordered_total": "1190.00", "currency": "EUR",
+    "description": "Beratungsleistung Oktober 2026: 1 x 1000.00 EUR netto zzgl. 19 % USt; Besteller Käufer Handels AG (DE999999999)" },
+  { "order_id": "PO-2026-002", "supplier_vat_id": "DE222222222" },
+  { "order_id": "PO-2026-003", "supplier_vat_id": "DE333333333", "ordered_total": "1190.00", "currency": "EUR",
+    "description": "Beratungsleistung Oktober 2026: 1 x 1000.00 EUR netto zzgl. 19 % USt; Besteller Käufer Handels AG (DE999999999)" },
+  { "order_id": "PO-2026-005", "supplier_vat_id": "DE555555555", "ordered_total": "1190.00", "currency": "EUR",
+    "description": "Beratungsleistung Oktober 2026: 1 x 1000.00 EUR netto zzgl. 19 % USt; Besteller Käufer Handels AG (DE999999999)" } ]

@@ -736,6 +736,13 @@ components:
             address_hash: hmac:9b7e2c41d08f6a35e1c94b70f2d83a6c5e19b04f7a2d6c83e5f01b94d7a2c6e1
             wallet_hash: hmac:2d6a9f13c8e04b75a1f39c62e8d05b47f3a1c96e0d84b27a5c3f19e60b8d4a73
           order_reference: PO-2026-001
+          open_order:
+            order_id: PO-2026-001
+            supplier_vat_id: DE111111111
+            ordered_total:
+              amount: '1190.00'
+              currency: EUR
+            description: 'Beratungsleistung Oktober 2026: 1 x 1000.00 EUR netto zzgl. 19 % USt; Besteller Käufer Handels AG (DE999999999)'
         supplier:
           supplier_hash: hmac:c3e85a1f60d27b94e4a03c18f7b62d95a0e4c71b38f5d26e9a14c07b5f3e82d6
           country: DE
@@ -1435,6 +1442,26 @@ components:
         order_reference:
           type: [string, 'null']
           description: BT-13, trimmed.
+        open_order:
+          description: |
+            Additive field (not in `required`): the `data/open-orders.json` entry that BT-13 and BT-31 match under the
+            I-8/T-3 rule, else `null`. Results stored before the field existed read as `null`.
+          oneOf:
+            - type: 'null'
+            - type: object
+              required: [order_id, supplier_vat_id, ordered_total, description]
+              properties:
+                order_id:
+                  type: string
+                supplier_vat_id:
+                  type: string
+                ordered_total:
+                  description: Ordered gross total, comparable with `total`; `null` when the entry has no total or currency.
+                  oneOf:
+                    - type: 'null'
+                    - $ref: '#/components/schemas/Amount'
+                description:
+                  type: [string, 'null']
     SupplierOut:
       type: object
       required: [supplier_hash, country, vat_country, vat_valid, known, approved, trust, blocked, first_invoice]

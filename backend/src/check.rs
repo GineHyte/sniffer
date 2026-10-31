@@ -22,8 +22,8 @@ use crate::criteria::wallet::age_days;
 use crate::criteria::{self, CheckContext, Hashes, LastApproved, SourceResult};
 use crate::model::{
     self, Amount, ChainabuseOut, CheckResult, DecidedBy, Engine, FinalDecision, InvoiceOut,
-    PairOut, PaymentOut, Signature, SkipReason, SkippedCheck, SkippedSource, Summary, SupplierOut,
-    ValidationOut, WalletOut,
+    OpenOrderOut, PairOut, PaymentOut, Signature, SkipReason, SkippedCheck, SkippedSource, Summary,
+    SupplierOut, ValidationOut, WalletOut,
 };
 use crate::mustang::Validation;
 use crate::normalize;
@@ -524,6 +524,7 @@ fn build_result(
             wallet_hash: h.wallet.clone(),
         },
         order_reference: inv.order_reference.clone(),
+        open_order: criteria::matched_open_order(ctx).map(OpenOrderOut::from),
     });
 
     let supplier = h.supplier.clone().map(|supplier_hash| {

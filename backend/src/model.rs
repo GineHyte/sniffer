@@ -221,6 +221,34 @@ pub struct InvoiceOut {
     pub due_payable: Option<Amount>,
     pub payment: PaymentOut,
     pub order_reference: Option<String>,
+    /// Open order that BT-13 and BT-31 match (I-8 / T-3), `null` without a match.
+    /// Additive field; results stored before it existed read as `null`.
+    #[serde(default)]
+    pub open_order: Option<OpenOrderOut>,
+}
+
+/// Matched entry of `data/open-orders.json`; detail fields are `null` when the entry has none.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OpenOrderOut {
+    pub order_id: String,
+    pub supplier_vat_id: String,
+    /// Ordered gross total, comparable with `invoice.total`.
+    pub ordered_total: Option<Amount>,
+    pub description: Option<String>,
+}
+
+impl From<&crate::config::OpenOrder> for OpenOrderOut {
+    fn from(o: &crate::config::OpenOrder) -> Self {
+        Self {
+            order_id: o.order_id.clone(),
+            supplier_vat_id: o.supplier_vat_id.clone(),
+            ordered_total: o
+                .ordered_total
+                .zip(o.currency.clone())
+                .map(|(amount, currency)| Amount { amount, currency }),
+            description: o.description.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -608,7 +636,13 @@ mod tests {
               "address_hash": ADDRESS_HASH,
               "wallet_hash": WALLET_HASH
             },
-            "order_reference": "PO-2026-001"
+            "order_reference": "PO-2026-001",
+            "open_order": {
+              "order_id": "PO-2026-001",
+              "supplier_vat_id": "DE111111111",
+              "ordered_total": { "amount": "1190.00", "currency": "EUR" },
+              "description": "Beratungsleistung Oktober 2026"
+            }
           },
           "supplier": {
             "supplier_hash": SUPPLIER_HASH,
@@ -689,6 +723,35 @@ mod tests {
         v["agent_tasks"] = json!({ "invoice": [], "wallet": [], "research": [] });
         let r: CheckResult = serde_json::from_value(v.clone()).unwrap();
         assert_eq!(serde_json::to_value(&r).unwrap(), v);
+    }
+
+    #[test]
+    fn open_order_is_additive() {
+        // A result stored before `invoice.open_order` existed reads as null and writes it as null.
+        let mut v = example();
+        v["invoice"].as_object_mut().unwrap().remove("open_order");
+        let r: CheckResult = serde_json::from_value(v.clone()).unwrap();
+        assert_eq!(r.invoice.as_ref().unwrap().open_order, None);
+        v["invoice"]["open_order"] = Value::Null;
+        assert_eq!(serde_json::to_value(&r).unwrap(), v);
+
+        // Entries without details give null detail fields; a total needs its currency.
+        let mut o = crate::config::OpenOrder {
+            order_id: "PO-1".into(),
+            supplier_vat_id: "DE111111111".into(),
+            ordered_total: Some(Decimal::new(119000, 2)),
+            currency: None,
+            description: None,
+        };
+        assert_eq!(
+            serde_json::to_value(OpenOrderOut::from(&o)).unwrap(),
+            json!({ "order_id": "PO-1", "supplier_vat_id": "DE111111111", "ordered_total": null, "description": null })
+        );
+        o.currency = Some("EUR".into());
+        assert_eq!(
+            serde_json::to_value(OpenOrderOut::from(&o)).unwrap()["ordered_total"],
+            json!({ "amount": "1190.00", "currency": "EUR" })
+        );
     }
 
     #[test]

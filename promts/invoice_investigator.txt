@@ -28,6 +28,7 @@ You may receive:
 - Available supplier billing history.
 - `agent_tasks` entries `{source, task}` from the Rust result. `source` is a criterion ID or status code. The `task` text is German.
 - Supplier approved-amount history: count, median, and the last approved invoice totals.
+- `open_order`: the open purchase order that the Rust Backend matched to the invoice order reference (BT-13) and the seller VAT ID, with `order_id`, `supplier_vat_id`, `ordered_total` (gross, comparable with the invoice total) and `description`. `null` means no matching open order exists.
 
 The supplier history contains totals only. Historical line items and unit prices are not available. If a line-item or unit-price comparison is not possible with the supplied data, treat that comparison as INSUFFICIENT_DATA and list it in `missing_information`. Do not estimate historical prices.
 
@@ -91,6 +92,8 @@ Identify discrepancies supported by documents.
 
 If the required contract or purchase order is unavailable, explicitly report the missing information.
 
+When `open_order` is supplied, check that `open_order.order_id` equals the invoice `order_reference`, that the invoice total does not exceed `open_order.ordered_total` in the same currency, and that the line items fit `open_order.description`. If all checks hold, the purchase order comparison is completed: list it in `checks_completed`. If `open_order` is `null`, or the invoice total exceeds the ordered total, or the line items contradict the description, report it as missing information or as a CONCERN finding.
+
 ### 5. Evidence-Based Assessment
 
 For every significant finding:
@@ -130,6 +133,8 @@ Use exactly one:
 **INSUFFICIENT_DATA** — There is not enough comparable or reliable information to assess the issue.
 
 A CRITICAL verdict must be supported by concrete evidence.
+
+Missing supplier history alone (for example a first invoice) does not make the verdict INSUFFICIENT_DATA when a matching `open_order` verifies the invoice amount and content. List the historical comparison under `checks_not_verified` and base the verdict on the purchase order comparison and the remaining invoice checks.
 
 ## OUTPUT
 

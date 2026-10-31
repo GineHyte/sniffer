@@ -15,7 +15,7 @@ use chrono::{DateTime, NaiveDate, Utc};
 use rust_decimal::Decimal;
 
 use crate::address::{AddressError, CheckedAddress, CredentialType, Network};
-use crate::config::{CriterionCfg, DataFiles, Params};
+use crate::config::{CriterionCfg, DataFiles, OpenOrder, Params};
 use crate::hashing::{self, CredentialKind, HmacKey};
 use crate::normalize::{self, LegalForms};
 use crate::parse::Invoice;
@@ -362,14 +362,19 @@ pub(crate) fn eur_total(ctx: &CheckContext) -> Option<Decimal> {
 /// I-8 / T-3: `None` when BT-13 is missing, else whether an open order of this
 /// supplier matches (`order_id()` and `vat()` on both sides).
 pub(crate) fn open_order_match(ctx: &CheckContext) -> Option<bool> {
+    ctx.invoice?.order_reference.as_deref()?;
+    Some(matched_open_order(ctx).is_some())
+}
+
+/// The `open-orders.json` entry that BT-13 and BT-31 match (same rule as I-8 / T-3),
+/// or `None` (no invoice, no BT-13, no BT-31 or no match).
+pub fn matched_open_order<'a>(ctx: &CheckContext<'a>) -> Option<&'a OpenOrder> {
     let inv = ctx.invoice?;
     let order = normalize::order_id(inv.order_reference.as_deref()?);
-    let Some(vat) = inv.seller_vat_id.as_deref().map(normalize::vat) else {
-        return Some(false);
-    };
-    Some(ctx.data.open_orders.iter().any(|o| {
+    let vat = normalize::vat(inv.seller_vat_id.as_deref()?);
+    ctx.data.open_orders.iter().find(|o| {
         normalize::order_id(&o.order_id) == order && normalize::vat(&o.supplier_vat_id) == vat
-    }))
+    })
 }
 
 #[cfg(test)]

@@ -755,6 +755,7 @@ CREATE TABLE list_updates (
 | `invoice.payment.credential_type` | string \| null | `key` \| `script` |
 | `invoice.payment.address_hash`, `wallet_hash` | string \| null | 3.3 |
 | `invoice.order_reference` | string \| null | BT-13 getrimmt |
+| `invoice.open_order` | object \| null | Eintrag aus `data/open-orders.json`, der BT-13 und BT-31 nach der Regel von I-8/T-3 entspricht, sonst `null`: `{order_id, supplier_vat_id, ordered_total: {amount, currency} \| null, description: string \| null}`. Zusatzfeld (Erweiterung nach 4 „Erweiterbarkeit“); ältere gespeicherte Ergebnisse ohne das Feld gelten als `null`. |
 | `supplier` | object \| null | `null`, wenn `supplier_hash` fehlt |
 | `supplier.country` | string \| null | BT-40 |
 | `supplier.vat_country` | string | Präfix von `vat(BT-31)` |
@@ -1104,6 +1105,7 @@ Hinweis: Die FATF hat am 30.10.2026 eine neue Liste veröffentlicht. Ihre Seite 
 [ { "order_id": "PO-2026-001", "supplier_vat_id": "DE111111111" },
   { "order_id": "PO-2026-002", "supplier_vat_id": "DE222222222" } ]
 ```
+Optionale Felder je Eintrag: `ordered_total` (Bruttobetrag als String, vergleichbar mit BT-112), `currency`, `description`. Sie fließen nur in `invoice.open_order` ein, nicht in die Bewertung. Die ausgelieferte Datei enthält zusätzlich Demo-Bestellungen `PO-2026-003` (`DE333333333`) und `PO-2026-005` (`DE555555555`) über 1190.00 EUR.
 
 Mock-Dateien (nur `*_MODE=mock`):
 - `data/blockfrost-mock.json`: `{"addresses": {"<adresse>": {"first_tx_time": "<RFC 3339>" | null} | {"error": true}}}`; unbekannte Adresse = keine Transaktion; `{"error": true}` = Ausfall.

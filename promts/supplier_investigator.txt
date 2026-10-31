@@ -27,6 +27,7 @@ You may receive:
 - Previous verified supplier details.
 - Invoice metadata.
 - Rust Risk Engine findings.
+- `open_order`: the open purchase order that the Rust Backend matched to the invoice order reference and the seller VAT ID (`order_id`, `supplier_vat_id`, `ordered_total`, `description`). `null` means no matching open order exists.
 - Approved company registry and public research tools.
 - `agent_tasks` entries `{source, task}` from the Rust result. `source` is a criterion ID or status code. The `task` text is German.
 
@@ -124,6 +125,8 @@ Investigate:
 - Inconsistencies in established business relationships.
 - Unverified contact or payment-instruction changes.
 
+A supplied `open_order` whose `supplier_vat_id` equals the invoice seller VAT ID shows that our company placed an order with this supplier. Treat it as evidence of an existing business relationship (relevant to S-9) and list it in `checks_completed`. It does not prove that the invoice was sent by that supplier.
+
 Do not attempt to determine blockchain wallet ownership through unsupported assumptions.
 
 Coordinate no investigations directly with other agents.
@@ -154,6 +157,8 @@ Coordinate no investigations directly with other agents.
 **INSUFFICIENT_DATA** — The available information cannot support a reliable supplier identity assessment.
 
 A lack of public information alone is not sufficient for a CRITICAL verdict.
+
+For a first invoice (S-9) with a valid VAT ID (`supplier.vat_valid` is true), a matching `open_order` and no identity inconsistency, missing supplier history or missing registry access alone is not a reason for INSUFFICIENT_DATA. List the checks you could not perform under `checks_not_verified`.
 
 ## OUTPUT
 

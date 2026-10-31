@@ -781,6 +781,15 @@ pub struct BuyerMaster {
 pub struct OpenOrder {
     pub order_id: String,
     pub supplier_vat_id: String,
+    /// Optional ordered gross total (decimal string, comparable with BT-112).
+    #[serde(default, with = "rust_decimal::serde::str_option")]
+    pub ordered_total: Option<Decimal>,
+    /// ISO 4217 code of `ordered_total`.
+    #[serde(default)]
+    pub currency: Option<String>,
+    /// Optional free-text description of the ordered goods or services.
+    #[serde(default)]
+    pub description: Option<String>,
 }
 
 /// All non-mock files of `DATA_DIR` (6.3).
@@ -1506,9 +1515,14 @@ mod tests {
                 postcode: "10115".into()
             }
         );
-        assert_eq!(d.open_orders.len(), 2);
+        assert_eq!(d.open_orders.len(), 4);
         assert_eq!(d.open_orders[1].order_id, "PO-2026-002");
         assert_eq!(d.open_orders[1].supplier_vat_id, "DE222222222");
+        assert_eq!(
+            d.open_orders[0].ordered_total,
+            Some(Decimal::new(119000, 2))
+        );
+        assert_eq!(d.open_orders[0].currency.as_deref(), Some("EUR"));
     }
 
     fn copy_data() -> tempfile::TempDir {
@@ -1580,6 +1594,34 @@ mod tests {
             e,
             ConfigError::DataFile {
                 file: "buyer-master.json",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn open_order_details_are_optional() {
+        let tmp = copy_data();
+        std::fs::write(
+            tmp.path().join("open-orders.json"),
+            r#"[{"order_id":"PO-1","supplier_vat_id":"DE111111111"}]"#,
+        )
+        .unwrap();
+        let d = DataFiles::load(tmp.path()).unwrap();
+        assert_eq!(d.open_orders[0].ordered_total, None);
+        assert_eq!(d.open_orders[0].currency, None);
+        assert_eq!(d.open_orders[0].description, None);
+
+        std::fs::write(
+            tmp.path().join("open-orders.json"),
+            r#"[{"order_id":"PO-1","supplier_vat_id":"DE111111111","ordered_total":"12x"}]"#,
+        )
+        .unwrap();
+        let e = DataFiles::load(tmp.path()).unwrap_err();
+        assert!(matches!(
+            e,
+            ConfigError::DataFile {
+                file: "open-orders.json",
                 ..
             }
         ));

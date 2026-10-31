@@ -595,6 +595,45 @@ mod tests {
     }
 
     #[test]
+    fn matched_open_order_is_the_i8_entry() {
+        use crate::criteria::matched_open_order;
+        let mut inv = f1();
+        let o = matched_open_order(&ctx().with_invoice(&inv)).expect("F1 matches PO-2026-001");
+        assert_eq!(o.order_id, "PO-2026-001");
+        assert_eq!(o.supplier_vat_id, "DE111111111");
+        assert_eq!(o.ordered_total, Some(d("1190.00")));
+        assert_eq!(o.currency.as_deref(), Some("EUR"));
+        // Normalized like I-8.
+        inv.order_reference = Some(" po-2026-001 ".into());
+        assert!(matched_open_order(&ctx().with_invoice(&inv)).is_some());
+        // Order of another supplier, no BT-13, no BT-31: no match.
+        inv.order_reference = Some("PO-2026-002".into());
+        assert_eq!(matched_open_order(&ctx().with_invoice(&inv)), None);
+        inv.order_reference = None;
+        assert_eq!(matched_open_order(&ctx().with_invoice(&inv)), None);
+        let mut inv = f1();
+        inv.seller_vat_id = None;
+        assert_eq!(matched_open_order(&ctx().with_invoice(&inv)), None);
+        fired(
+            &I8,
+            &ctx().with_invoice(&inv),
+            8,
+            "BT-13 not an open order of this supplier",
+        );
+        // Demo orders for the --new-supplier VATs.
+        let mut inv = f1();
+        inv.seller_vat_id = Some("DE333333333".into());
+        inv.order_reference = Some("PO-2026-003".into());
+        assert_eq!(
+            matched_open_order(&ctx().with_invoice(&inv)).map(|o| o.order_id.as_str()),
+            Some("PO-2026-003")
+        );
+        inv.seller_vat_id = Some("DE555555555".into());
+        inv.order_reference = Some("PO-2026-005".into());
+        assert_eq!(eval(&I8, &ctx().with_invoice(&inv)), None);
+    }
+
+    #[test]
     fn i10_multiple_branch() {
         let mut inv = f1();
         assert_eq!(eval(&I10, &ctx().with_invoice(&inv)), None);

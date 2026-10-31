@@ -40,6 +40,11 @@ fn assert_test1_result(r: &Value) {
         "BT-13 matches an open order of this supplier (cap reached)"
     );
     assert_eq!(red[3]["evidence"], "VIES: valid (cap reached)");
+    assert_eq!(r["invoice"]["open_order"]["order_id"], "PO-2026-001");
+    assert_eq!(
+        r["invoice"]["open_order"]["ordered_total"],
+        json!({ "amount": "1190.00", "currency": "EUR" })
+    );
     assert!(incomplete(r).is_empty());
     assert!(skipped(r).is_empty());
     for agent in ["invoice", "wallet", "research"] {
@@ -254,7 +259,12 @@ fn spec4_example(check_id: &str) -> Value {
           "means_code": "ZZZ", "network": "preprod", "asset": "ADA", "address_type": "base",
           "credential_type": "key", "address_hash": hashing::address_hash(&key, W2), "wallet_hash": wallet
         },
-        "order_reference": "PO-2026-001"
+        "order_reference": "PO-2026-001",
+        "open_order": {
+          "order_id": "PO-2026-001", "supplier_vat_id": "DE111111111",
+          "ordered_total": { "amount": "1190.00", "currency": "EUR" },
+          "description": "Beratungsleistung Oktober 2026: 1 x 1000.00 EUR netto zzgl. 19 % USt; Besteller Käufer Handels AG (DE999999999)"
+        }
       },
       "supplier": {
         "supplier_hash": supplier, "country": "DE", "vat_country": "DE", "vat_valid": true,
@@ -318,6 +328,7 @@ async fn test10_f10_high_by_score() {
         criteria(&r),
         ids(&[("S-1", 35), ("I-5", 10), ("I-7", 8), ("I-8", 8), ("S-9", 5)])
     );
+    assert_eq!(r["invoice"]["open_order"], Value::Null);
     let reasons: Vec<&str> = r["summary"]["decline_reasons"]
         .as_array()
         .unwrap()

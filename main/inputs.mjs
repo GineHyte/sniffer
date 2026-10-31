@@ -1,9 +1,11 @@
 // Domain-scoped investigator inputs (Task 26, A6, main prompt Step 4). Each role gets only the fields of its domain.
 //  invoice:  Rust invoice block (numbers, dates, totals, validation status), invoice-side XML fields (notes, terms,
-//            line items, totals, order/contract refs), the supplier approved-amount history (O2). No names, no address.
+//            line items, totals, order/contract refs), the supplier approved-amount history (O2), and the open order the
+//            Rust backend matched to BT-13 + BT-31 (`open_order`, null without a match). No names, no address.
 //  wallet:   raw recipient address (BT-84) and payment means, Rust wallet/pair blocks, supplier counts only. No names.
 //  supplier: seller identity from the XML (name, IDs, VAT, address, contact), Rust supplier block, history counts,
-//            invoice number and date. No wallet address, no line items.
+//            invoice number and date, the matched open order (business-relationship evidence for S-9). No wallet address,
+//            no line items.
 // Every role also gets its own criteria (id, name, points, evidence) and agent_tasks (`research` → supplier).
 import {buildInvestigatorInput,INVESTIGATOR_ROLES,MAX_INPUT_CHARS} from '../investigator/contract.mjs';
 
@@ -26,6 +28,15 @@ function historyView(history){
  return {available:true,...pick(history,['approved_count','median_eur','last_amounts','first_seen'])};
 }
 
+// Rust `invoice.open_order` (I-8/T-3 match from backend/data/open-orders.json): the backend is the single source of truth.
+function openOrderView(invoice){
+ const order=invoice?.open_order;
+ if(!order||typeof order!=='object')return null;
+ const view=pick(order,['order_id','supplier_vat_id','ordered_total','description']);
+ if(typeof view.description==='string')view.description=view.description.slice(0,500);
+ return view;
+}
+
 function dataFor(role,{result,fields,history,xmlStatus}){
  const summary=result.summary;
  const common={
@@ -39,6 +50,7 @@ function dataFor(role,{result,fields,history,xmlStatus}){
    validation:pick(invoice.validation,['status','errors','error_rules'])},
   invoice_xml:fields?.invoice??null,
   supplier_history:historyView(history),
+  open_order:openOrderView(invoice),
  };
  if(role==='wallet')return {...common,
   payment:{...pick(invoice.payment,['means_code','network','asset','address_type','credential_type']),
@@ -52,6 +64,7 @@ function dataFor(role,{result,fields,history,xmlStatus}){
   supplier_xml:fields?.supplier??null,
   supplier:pick(result.supplier,['country','vat_country','vat_valid','known','approved','trust','blocked','first_invoice']),
   supplier_history:historyView(history),
+  open_order:openOrderView(invoice),
  };
 }
 
