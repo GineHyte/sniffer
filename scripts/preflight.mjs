@@ -114,7 +114,8 @@ export async function runChecks(argv,env=process.env){
   const xmlFor=rewrite=>prepareXml(raw,{...base,...rewrite});
   const lookups=supplierLookups(env,{mainUrl:options.mainUrl,journalDir:env.DEMO_STATE_DIR?.trim()||join(ROOT,'.local','demo')});
   let supplier=null;
-  try{supplier=await resolveSupplier(options,{xmlFor,lookups});if(supplier)add('fixture: supplier rewrite',true,supplierLines(supplier).join('; '));}
+  if(options.freshWallet)add('fixture: --fresh-wallet',true,'preflight creates no wallet: it checks the fixture address, so the demo case id will differ',{required:false});
+  try{supplier=await resolveSupplier(options,{xmlFor,lookups});if(supplier)add('fixture: supplier rewrite',true,supplierLines(supplier,{freshWallet:options.freshWallet}).join('; '));}
   catch(error){add('fixture: supplier rewrite',false,error.message);}
   xml=xmlFor(supplier?.rewrite??{});
   payout=payoutLovelace(duePayableCents(xml),env.ADA_PER_EUR);

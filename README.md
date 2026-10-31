@@ -189,6 +189,7 @@ This runs one invoice through the whole pipeline: x402 intake payment, Initial C
 
    Running it again with the same invoice only resumes polling. For a new case, pass `--invoice-number <new number>`. Use `npm run demo -- --case <case_id>` to follow an existing case without paying.
    A second invoice from the same supplier loses S-9 (first invoice), scores low and is auto-approved without investigators. Add `--new-supplier` to swap the seller (VAT BT-31, name BT-27, open order BT-13) for the first VAT that `backend/data/vies-mock.json` marks valid and the backend has no invoice for. It reads `GET /v1/suppliers/{supplier_hash}/history` with `SNIFFER_HMAC_KEY` and `SNIFFER_API_TOKEN`. Without them, pass `--supplier-vat <VAT>` (and optionally `--supplier-name <name>`). `npm run preflight` reports whether the submitted supplier is still fresh.
+   The backend returns the matched open order as `invoice.open_order` (from `backend/data/open-orders.json`), and Main passes it to the invoice and supplier investigators, so a first invoice can be checked against its purchase order. Add `--fresh-wallet` to pay the supplier to a new, never-used address: it creates a local x402 wallet `demo-recipient-<ms>` (mnemonic in `.local/x402/`) and puts its address into BT-84, so S-1 (address already used by another supplier) cannot fire. Example: `npm run demo -- --confirm-live-payment --new-supplier --fresh-wallet` (expected medium, score 20).
 
 ## Check your changes
 

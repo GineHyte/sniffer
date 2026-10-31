@@ -5,12 +5,14 @@
 // with payout.state 'submitted'; the demo then keeps polling (up to 3 min, --no-wait-confirm skips it) for 'confirmed'.
 // Every status line shows the time since the demo started; a timing summary closes the run.
 // Run only with explicit user approval (Main must be running: npm run main -- --confirm-live-payments):
-//   npm run demo -- --confirm-live-payment [--fixture docs/fixtures/f1.xml] [--invoice-number RE-2026-0413] [--recipient-wallet payee] [--new-supplier]
+//   npm run demo -- --confirm-live-payment [--fixture docs/fixtures/f1.xml] [--invoice-number RE-2026-0413] [--recipient-wallet payee] [--new-supplier] [--fresh-wallet]
 // Poll an existing case without paying: npm run demo -- --case case-<32 hex>
 // One payment per submitted XML: the payOnce key is derived from the XML hash, so a rerun returns the earlier
 // payment and only polls. Use --invoice-number for a new case (the backend rejects an exact duplicate with KO-3).
 // --new-supplier swaps the seller (BT-31 VAT, BT-27 name, BT-13 open order) for the first VIES-mock-valid VAT the backend has no
 // invoice for (GET /v1/suppliers/{supplier_hash}/history = 404), so S-9 fires again and the case reaches the investigators.
+// --fresh-wallet creates a new local x402 wallet demo-recipient-<ms> (x402/wallets.mjs createWallet, mnemonic stays in
+// .local/x402/) and pays the supplier to its never-used address, so S-1 (address approved for another supplier) cannot fire.
 import {createHmac} from 'node:crypto';
 import {existsSync,readFileSync} from 'node:fs';
 import {dirname,join,resolve} from 'node:path';
@@ -41,6 +43,7 @@ Options:
   --fixture <path>            invoice XML (default ${DEFAULT_FIXTURE})
   --invoice-number <id>       replace the invoice number (BT-1 and payment reference) for a fresh case
   --recipient-wallet <name>   replace the payment address (BT-84) with this x402 wallet's address
+  --fresh-wallet              create a new local x402 wallet demo-recipient-<ms> and use its never-used address as BT-84
   --new-supplier              replace the seller with the first VIES-mock-valid VAT the backend has no invoice for (S-9 fires again)
   --supplier-vat <VAT>        replace the seller VAT ID (BT-31) with this one (supplier identity = VAT)
   --supplier-name <name>      replace the seller name (BT-27); default for a new VAT: a name per mock VAT
@@ -57,13 +60,14 @@ const VALUE_FLAGS={'--fixture':'fixture','--invoice-number':'invoiceNumber','--r
 export function parseArgs(argv,env={}){
  const options={confirm:false,help:false,fixture:DEFAULT_FIXTURE,invoiceNumber:null,recipientWallet:null,wallet:DEFAULT_WALLET,
   mainUrl:`http://127.0.0.1:${env.MAIN_PORT?.trim()||21951}`,timeoutMs:DEFAULT_TIMEOUT_MS,pollMs:DEFAULT_POLL_MS,caseId:null,
-  newSupplier:false,supplierVat:null,supplierName:null,waitConfirm:true};
+  newSupplier:false,supplierVat:null,supplierName:null,waitConfirm:true,freshWallet:false};
  for(let i=0;i<argv.length;i++){
   const arg=argv[i];
   if(arg===CONFIRM_FLAG){options.confirm=true;continue;}
   if(arg==='--help'||arg==='-h'){options.help=true;continue;}
   if(arg==='--new-supplier'){options.newSupplier=true;continue;}
   if(arg==='--no-wait-confirm'){options.waitConfirm=false;continue;}
+  if(arg==='--fresh-wallet'){options.freshWallet=true;continue;}
   const key=VALUE_FLAGS[arg];
   if(!key)throw new Error(`Unknown argument: ${arg}\n${USAGE}`);
   const value=argv[++i];
@@ -81,6 +85,7 @@ export function parseArgs(argv,env={}){
  if(options.supplierVat!==null&&!VAT_RE.test(options.supplierVat))throw new Error('--supplier-vat must be an uppercase VAT ID like DE222222222 (country prefix + 2-14 A-Z0-9).');
  if(options.supplierName!==null&&!SUPPLIER_NAME_RE.test(options.supplierName))throw new Error('--supplier-name must be 1-100 characters without control characters, < or >.');
  if(options.newSupplier&&options.supplierVat!==null)throw new Error('Use either --new-supplier or --supplier-vat, not both.');
+ if(options.freshWallet&&options.recipientWallet!==null)throw new Error('Use either --fresh-wallet or --recipient-wallet, not both.');
  if(!/^https?:\/\/[^\s/]+(\/[^\s]*)?$/.test(options.mainUrl))throw new Error('--main-url must be an http(s) URL.');
  options.mainUrl=options.mainUrl.replace(/\/+$/,'');
  return options;
@@ -196,23 +201,44 @@ export async function pickFreshSupplier({candidates,caseIdFor,lookups}){
  throw new Error(`No fresh supplier left: every VIES-mock-valid VAT (${candidates.join(', ')||'none'}) is used${skipped.length?` (${skipped.map(s=>`${s.vat}: ${s.reason}`).join('; ')})`:''}. Add a new valid VAT to ${VIES_MOCK_FILE}, rebuild the backend (npm run stack) and rerun, or pass --supplier-vat <VAT>.`);
 }
 
+export const FRESH_WALLET_PREFIX='demo-recipient-';
+/** Name for a --fresh-wallet recipient: demo-recipient-<epoch ms> (28 characters, fits the x402 wallet name rule). */
+export const freshWalletName=(nowMs=Date.now())=>`${FRESH_WALLET_PREFIX}${Math.trunc(nowMs)}`;
+
+/**
+ * Recipient for BT-84: --fresh-wallet creates a new wallet with createWallet(name) (x402/wallets.mjs, prints nothing secret),
+ * --recipient-wallet reads an existing one. Returns {name, address, fresh} or null (fixture address unchanged).
+ */
+export function resolveRecipient(options,{createWallet,walletAddress,now=Date.now}){
+ if(options.freshWallet){
+  const name=freshWalletName(now());
+  const {address}=createWallet(name);
+  if(typeof address!=='string'||!ADDRESS_RE.test(address))throw new Error(`New wallet ${name} has no Preprod address.`);
+  return {name,address,fresh:true};
+ }
+ if(options.recipientWallet)return {name:options.recipientWallet,address:walletAddress(options.recipientWallet),fresh:false};
+ return null;
+}
+
 /** Expected band for a seller, as far as the demo can know it (wallet history is not readable). fresh: true/false/null. */
-export function expectedOutcome({vat,fresh,viesValid,openOrder}){
+export function expectedOutcome({vat,fresh,viesValid,openOrder,freshWallet=false}){
  if(viesValid===false)return `expect high: S-2 fires (+35), the VIES mock marks ${vat} invalid`;
  if(fresh===false)return `expect low: S-9 does not fire, ${vat} already has invoices in the backend; the case may auto-approve without investigators (use --new-supplier)`;
  const order=openOrder?'':`; I-8 fires (+8): BT-13 is not an open order of ${vat}`;
  if(fresh===null)return `supplier history of ${vat} unknown${order}`;
- return `expect medium: S-9 fires (+5)${order}. With a wallet the backend has not seen: I-2 + W-4 + S-9 -> score ${openOrder?20:38}. If the payment wallet was approved before, S-1 (+35) fires too (score >= 40, still medium unless the wallet also has a risk rejection)`;
+ const sum=openOrder?'I-2 +20, W-4 +10, S-9 +5, T-3 -10, T-4 -5 -> score 20':'I-2 +20, W-4 +10, S-9 +5, I-8 +8, T-4 -5 -> score 38';
+ if(freshWallet)return `expect medium: S-9 fires (+5)${order}. Fresh recipient wallet (never used, so S-1 cannot fire): ${sum}`;
+ return `expect medium: S-9 fires (+5)${order}. With a wallet the backend has not seen: ${sum}. If the payment wallet was approved before, S-1 (+35) fires too (score >= 40, still medium unless the wallet also has a risk rejection)`;
 }
 
 /** Lines describing the resolved seller rewrite and the expected outcome. */
-export function supplierLines(supplier){
+export function supplierLines(supplier,{freshWallet=false}={}){
  if(!supplier)return [];
  const lines=supplier.skipped.map(s=>`Skipping supplier ${s.vat}: ${s.reason}`);
  const {supplierVat,supplierName,orderReference}=supplier.rewrite;
  if(supplierVat===undefined){lines.push(`Seller name -> ${supplierName} (VAT unchanged: supplier history unchanged)`);return lines;}
  lines.push(`Supplier VAT ${supplierVat} (${supplierName})${orderReference?`, order ${orderReference}`:''}`);
- lines.push(supplier.resume?`Resuming the earlier demo case for ${supplierVat} (no new payment)`:expectedOutcome(supplier));
+ lines.push(supplier.resume?`Resuming the earlier demo case for ${supplierVat} (no new payment)`:expectedOutcome({...supplier,freshWallet}));
  return lines;
 }
 
@@ -426,25 +452,27 @@ export async function follow(options,caseId,{fetchCase=id=>getJson(`${options.ma
 
 async function payIntake(options,{clock,started,marks}){
  const env=process.env;
- const [{payOnce,lovelaceString,readPayJournal,payJournalPath},{readWallet,walletAddress,fetchBalance,formatAda,NETWORK},{blockfrostProvider},{toClientCardanoSigner}]=await Promise.all([
+ const [{payOnce,lovelaceString,readPayJournal,payJournalPath},{readWallet,walletAddress,createWallet,fetchBalance,formatAda,NETWORK},{blockfrostProvider},{toClientCardanoSigner}]=await Promise.all([
   import('../x402/pay.mjs'),import('../x402/wallets.mjs'),import('../x402/facilitator.mjs'),import('@x402/cardano')]);
  const price=lovelaceString(env.INTAKE_PRICE_LOVELACE?.trim(),'INTAKE_PRICE_LOVELACE');
  const payTo=env.INTAKE_PAY_TO?.trim();
  if(!payTo||!ADDRESS_RE.test(payTo))throw new Error('INTAKE_PAY_TO is not set to a Preprod address. Run with: npm run demo (loads .local/live.env).');
  const projectId=env.BLOCKFROST_API_KEY_PREPROD;
  const raw=readFileSync(resolve(ROOT,options.fixture),'utf8');
- const base={invoiceNumber:options.invoiceNumber,recipientAddress:options.recipientWallet?walletAddress(options.recipientWallet):null};
+ // Before --fresh-wallet creates a wallet file: no new wallet when Main is down.
+ const health=await getJson(`${options.mainUrl}/health`,{timeoutMs:5000}).catch(()=>({status:0}));
+ if(health.status!==200)throw new Error(`Main API is not healthy at ${options.mainUrl} (HTTP ${health.status||'none'}). Start it with: npm run main -- --confirm-live-payments`);
+ const recipient=resolveRecipient(options,{createWallet,walletAddress,now:()=>clock.now()});
+ if(recipient?.fresh)out(`Fresh recipient wallet ${recipient.name}: ${recipient.address}`);
+ const base={invoiceNumber:options.invoiceNumber,recipientAddress:recipient?.address??null};
  const xmlFor=rewrite=>prepareXml(raw,{...base,...rewrite});
  const journalDir=env.DEMO_STATE_DIR?.trim()||join(ROOT,'.local','demo');
  const supplier=await resolveSupplier(options,{xmlFor,lookups:supplierLookups(env,{mainUrl:options.mainUrl,journalDir})});
- for(const line of supplierLines(supplier))out(line);
+ for(const line of supplierLines(supplier,{freshWallet:Boolean(recipient?.fresh)}))out(line);
  const xml=xmlFor(supplier?.rewrite??{});
  const {caseId}=intakeIds(xml);
  const key=payKeyFor(caseId);
- out(`Fixture ${options.fixture}${options.invoiceNumber?` as ${options.invoiceNumber}`:''}${options.recipientWallet?` paying ${options.recipientWallet}`:''}${supplier?.vat?` from ${supplier.vat}`:''} -> ${caseId}`);
-
- const health=await getJson(`${options.mainUrl}/health`,{timeoutMs:5000}).catch(()=>({status:0}));
- if(health.status!==200)throw new Error(`Main API is not healthy at ${options.mainUrl} (HTTP ${health.status||'none'}). Start it with: npm run main -- --confirm-live-payments`);
+ out(`Fixture ${options.fixture}${options.invoiceNumber?` as ${options.invoiceNumber}`:''}${recipient?` paying ${recipient.name}`:''}${supplier?.vat?` from ${supplier.vat}`:''} -> ${caseId}`);
 
  const earlier=readPayJournal(payJournalPath(journalDir,key));
  const wallet=readWallet(options.wallet);

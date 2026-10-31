@@ -8,7 +8,8 @@ import {fileURLToPath} from 'node:url';
 import {parseArgs,assertConfirmed,prepareXml,duePayableCents,payoutLovelace,caseIdFromJournal,pollCase,progressLine,payKeyFor,
  follow,formatElapsed,trackMilestones,timingLines,failureMessage,intakeRefusal,payoutUnconfirmed,DEFAULT_CONFIRM_WAIT_MS,
  normalizeVat,supplierHash,sellerVat,validMockVats,openOrderFor,supplierRewrite,pickFreshSupplier,resolveSupplier,expectedOutcome,supplierLines,
- supplierLookups,readRepoJson,VIES_MOCK_FILE,OPEN_ORDERS_FILE,CONFIRM_FLAG,DEFAULT_FIXTURE,DEFAULT_TIMEOUT_MS,DEFAULT_POLL_MS} from './demo-case.mjs';
+ supplierLookups,readRepoJson,VIES_MOCK_FILE,OPEN_ORDERS_FILE,CONFIRM_FLAG,DEFAULT_FIXTURE,DEFAULT_TIMEOUT_MS,DEFAULT_POLL_MS,
+ freshWalletName,resolveRecipient} from './demo-case.mjs';
 import {intakeIds} from '../main/case-store.mjs';
 import {PAY_KEY_REGEX} from '../x402/pay.mjs';
 
@@ -20,21 +21,22 @@ const ADDR='addr_test1qqsukwn3txs33kx4qh97g5suejsc6w78x994j7y6sefsk29vnt2urqy4t5
 test('parseArgs: defaults, every option, and invalid input',()=>{
  const defaults=parseArgs([]);
  assert.deepEqual(defaults,{confirm:false,help:false,fixture:DEFAULT_FIXTURE,invoiceNumber:null,recipientWallet:null,wallet:'payer',
-  mainUrl:'http://127.0.0.1:21951',timeoutMs:DEFAULT_TIMEOUT_MS,pollMs:DEFAULT_POLL_MS,caseId:null,newSupplier:false,supplierVat:null,supplierName:null,waitConfirm:true});
+  mainUrl:'http://127.0.0.1:21951',timeoutMs:DEFAULT_TIMEOUT_MS,pollMs:DEFAULT_POLL_MS,caseId:null,newSupplier:false,supplierVat:null,supplierName:null,waitConfirm:true,freshWallet:false});
  assert.equal(DEFAULT_POLL_MS,2000);
  assert.equal(parseArgs(['--no-wait-confirm']).waitConfirm,false);
  assert.equal(parseArgs([],{MAIN_PORT:'22000'}).mainUrl,'http://127.0.0.1:22000');
  const all=parseArgs([CONFIRM_FLAG,'--fixture','docs/fixtures/f11.xml','--invoice-number','RE-2026-0413','--recipient-wallet','payee','--wallet','payer2',
   '--main-url','http://localhost:1234/','--timeout-ms','60000','--poll-ms','500','--case',CASE,'--supplier-vat','DE222222222','--supplier-name','Müller & Söhne GmbH']);
  assert.deepEqual(all,{confirm:true,help:false,fixture:'docs/fixtures/f11.xml',invoiceNumber:'RE-2026-0413',recipientWallet:'payee',wallet:'payer2',
-  mainUrl:'http://localhost:1234',timeoutMs:60000,pollMs:500,caseId:CASE,newSupplier:false,supplierVat:'DE222222222',supplierName:'Müller & Söhne GmbH',waitConfirm:true});
+  mainUrl:'http://localhost:1234',timeoutMs:60000,pollMs:500,caseId:CASE,newSupplier:false,supplierVat:'DE222222222',supplierName:'Müller & Söhne GmbH',waitConfirm:true,freshWallet:false});
  assert.equal(parseArgs(['--new-supplier','--supplier-name','Beta GmbH']).newSupplier,true);
  assert.equal(parseArgs(['-h']).help,true);
  for(const [argv,reason] of [[['--bogus'],/Unknown argument/],[['--fixture'],/needs a value/],[['--fixture','--poll-ms'],/needs a value/],
   [['--timeout-ms','0'],/timeout-ms/],[['--poll-ms','1.5'],/poll-ms/],[['--case','case-123'],/--case/],[['--invoice-number','a b'],/invoice-number/],
   [['--wallet','Payer'],/--wallet/],[['--recipient-wallet','../x'],/recipient-wallet/],[['--main-url','ftp://x'],/main-url/],
   [['--supplier-vat','de222222222'],/supplier-vat/],[['--supplier-vat','D1'],/supplier-vat/],[['--supplier-name','<x>'],/supplier-name/],
-  [['--supplier-name','a'.repeat(101)],/supplier-name/],[['--new-supplier','--supplier-vat','DE222222222'],/either --new-supplier or --supplier-vat/]]){
+  [['--supplier-name','a'.repeat(101)],/supplier-name/],[['--new-supplier','--supplier-vat','DE222222222'],/either --new-supplier or --supplier-vat/],
+  [['--fresh-wallet','--recipient-wallet','payee'],/either --fresh-wallet or --recipient-wallet/]]){
   assert.throws(()=>parseArgs(argv),reason,argv.join(' '));
  }
 });
@@ -288,7 +290,14 @@ test('supplier candidates come from the VIES mock; a new VAT takes its own open 
  assert.deepEqual(validMockVats(mock),['DE111111111','DE222222222','DE333333333','DE555555555']);
  assert.deepEqual(validMockVats({A:false,B:'error',C:true}),['C']);
  assert.equal(openOrderFor('DE222222222',orders),'PO-2026-002');
- assert.equal(openOrderFor('DE333333333',orders),null);
+ // Demo open orders for the --new-supplier VATs that follow DE111/DE222.
+ assert.equal(openOrderFor('DE333333333',orders),'PO-2026-003');
+ assert.equal(openOrderFor('DE555555555',orders),'PO-2026-005');
+ for(const vat of ['DE333333333','DE555555555']){
+  const order=orders.find(entry=>entry.supplier_vat_id===vat);
+  assert.equal(order.currency,'EUR');assert.ok(Number(order.ordered_total)>=1190,vat);
+  assert.match(prepareXml(F1,supplierRewrite(vat,{orders})),new RegExp(`<ram:IssuerAssignedID>${order.order_id}</ram:IssuerAssignedID>`));
+ }
  assert.deepEqual(supplierRewrite('DE222222222',{orders}),{supplierVat:'DE222222222',supplierName:'Beta Beratung GmbH',orderReference:'PO-2026-002'});
  assert.deepEqual(supplierRewrite('DE777777777',{name:'X AG',orders}),{supplierVat:'DE777777777',supplierName:'X AG',orderReference:null});
  assert.equal(supplierRewrite('DE777777777').supplierName,'Lieferant DE777777777 GmbH');
@@ -349,7 +358,7 @@ test('resolveSupplier builds the rewrite and the expected outcome for --new-supp
  assert.equal(known.fresh,false);assert.match(supplierLines(known)[1],/^expect low: S-9 does not fire/);
  const invalid=await resolveSupplier(parseArgs(['--supplier-vat','DE444444444']),{xmlFor,lookups});
  assert.equal(invalid.viesValid,false);assert.match(supplierLines(invalid)[1],/^expect high: S-2 fires/);
- const noOrder=await resolveSupplier(parseArgs(['--supplier-vat','DE333333333','--supplier-name','Gamma AG']),{xmlFor,lookups});
+ const noOrder=await resolveSupplier(parseArgs(['--supplier-vat','DE333333333','--supplier-name','Gamma AG']),{xmlFor,lookups,orders:[]});
  assert.deepEqual([noOrder.fresh,noOrder.viesValid,noOrder.rewrite.supplierName,noOrder.openOrder],[true,true,'Gamma AG',null]);
  assert.match(supplierLines(noOrder)[1],/^expect medium: S-9 fires \(\+5\); I-8 fires \(\+8\).*score 38/);
  const offline=await resolveSupplier(parseArgs(['--supplier-vat','DE333333333']),{xmlFor,lookups:{history:async()=>{throw new Error('no key');}}});
@@ -367,4 +376,22 @@ test('supplier history lookup needs the HMAC key and token and never calls the n
  assert.equal((await lookups.history('DE222222222')).status,0);
  assert.equal(await lookups.journalExists(CASE),false);
  assert.equal(await lookups.caseStatus(CASE),null);
+});
+
+test('--fresh-wallet creates a demo-recipient wallet through the injected creator and uses its address',()=>{
+ assert.equal(parseArgs(['--fresh-wallet']).freshWallet,true);
+ assert.equal(freshWalletName(1793433600123),'demo-recipient-1793433600123');
+ assert.match(freshWalletName(1793433600123),/^[a-z][a-z0-9-]{0,31}$/,'x402 wallet name rule');
+ const created=[];
+ const deps={createWallet:name=>{created.push(name);return {address:ADDR};},walletAddress:()=>{throw new Error('not read');},now:()=>1793433600123};
+ assert.deepEqual(resolveRecipient(parseArgs([CONFIRM_FLAG,'--fresh-wallet']),deps),{name:'demo-recipient-1793433600123',address:ADDR,fresh:true});
+ assert.deepEqual(created,['demo-recipient-1793433600123']);
+ assert.match(prepareXml(F1,{recipientAddress:ADDR}),new RegExp(`<ram:ProprietaryID>${ADDR}</ram:ProprietaryID>`));
+ assert.throws(()=>resolveRecipient(parseArgs(['--fresh-wallet']),{...deps,createWallet:()=>({address:'addr1mainnet'})}),/no Preprod address/);
+ // Without the flag nothing is created; --recipient-wallet still reads the named wallet.
+ assert.equal(resolveRecipient(parseArgs([]),{...deps,createWallet:()=>assert.fail('created')}),null);
+ assert.deepEqual(resolveRecipient(parseArgs(['--recipient-wallet','payee']),{createWallet:()=>assert.fail('created'),walletAddress:name=>name==='payee'?ADDR:null}),
+  {name:'payee',address:ADDR,fresh:false});
+ assert.match(expectedOutcome({vat:'DE333333333',fresh:true,viesValid:true,openOrder:'PO-2026-003',freshWallet:true}),
+  /^expect medium: S-9 fires \(\+5\)\. Fresh recipient wallet .*T-3 -10, T-4 -5 -> score 20$/);
 });
