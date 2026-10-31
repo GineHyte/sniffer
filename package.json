@@ -9,12 +9,16 @@
     "start": "node --env-file-if-exists=.env start.mjs",
     "worker": "node --env-file-if-exists=.env worker.mjs",
     "api": "node --env-file-if-exists=.env --env-file-if-exists=.local/mps-runtime.env agent-api.mjs",
-    "test": "node --env-file-if-exists=.env --test *.test.mjs agents/*.test.mjs"
+    "test": "node --env-file-if-exists=.env --test *.test.mjs agents/*.test.mjs x402/*.test.mjs"
   },
   "dependencies": {
-    "eve": "0.71.0",
+    "@ai-sdk/openai-compatible": "3.0.62",
+    "@evolution-sdk/evolution": "0.5.19",
+    "@x402/cardano": "2.28.0",
+    "@x402/core": "2.28.0",
+    "@x402/fetch": "2.28.0",
     "ai": "7.0.127",
-    "zod": "4.6.5",
-    "@ai-sdk/openai-compatible": "3.0.62"
+    "eve": "0.71.0",
+    "zod": "4.6.5"
   }
 }

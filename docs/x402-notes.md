@@ -288,3 +288,38 @@ Stop and ask the user per the Task 21 gate.
 - Coverage (secondary): https://www.mitrade.com/insights/news/live-news/article-3-2109374-20260923
 - Blockfrost OpenAPI: https://raw.githubusercontent.com/blockfrost/openapi/master/openapi.yaml
 - Faucet: https://docs.cardano.org/cardano-testnets/tools/faucet/
+
+## Live test (Task 21 measured payment)
+
+### Phase A: install, wallets, scripts (2026-10-31). No payment made.
+
+Install (measured on Windows 11, Node 24.22.2, npm 11.19.1):
+- `npm install --save-exact --ignore-scripts @x402/cardano@2.28.0 @x402/core@2.28.0 @x402/fetch@2.28.0` added 14 packages.
+- No package in the lockfile has `hasInstallScript`, so `--ignore-scripts` skipped nothing. None of the three packages declares peer dependencies.
+- Resolved tree: `@evolution-sdk/evolution@0.5.19` (with `effect@3.22.4`, `@noble/curves@2.4.0`, `@noble/hashes@2.4.0`, `@scure/base|bip32|bip39@2.4.0`), `lz-string@1.5.0`, and `zod@3.25.76` nested under `@x402/core`. The repo's `zod@4.6.5` is unchanged. This settles R7 and R9 for install.
+- `npm audit` went from 3 to 6 findings. The 3 new ones (high) are `@x402/cardano|core|fetch`, all via the zod advisory "exhaust memory while validating oversized constrained collections" (`<4.6.6`). npm's fix is 2.29.0, which fails the 2-week rule. Not upgraded.
+
+Files (all in `x402/`):
+- `wallets.mjs`: `create|address|balance <name>`.
+  - Mnemonic: `PrivateKey.generateMnemonic(256)` from `@evolution-sdk/evolution` (24 words, BIP-39).
+  - Address: `toClientCardanoSigner(...).getAddress()`, i.e. the CIP-1852 account 0 **base** address, network id 0. It is checked equal to `addressFromSeed(m, {networkId:0})`.
+  - Writes `.local/x402/<name>.json` with `wx` (no overwrite) and mode 0o600 in a 0o700 dir. Windows ignores POSIX modes, so the files rely on the user-profile ACL.
+  - stdout carries the address only.
+  - Note: `@evolution-sdk/evolution` is imported directly but is a transitive dependency of `@x402/cardano` (not listed in `package.json`).
+- `facilitator.mjs`: in-process `x402Facilitator` + `ExactCardanoScheme` (facilitator) + `toFacilitatorCardanoSigner({awaitConfirmation:false})` on Blockfrost Preprod, wrapped so `getSupported()` returns a Promise.
+- `live-test.mjs`: needs `--confirm-live-payment`.
+  - Server: `node:http` on 127.0.0.1, `GET /paid-test`, 1000000 lovelace to the payee, `cardano:preprod`, `maxTimeoutSeconds:600`, `l1Confirmations:0`.
+  - Client: `@x402/fetch` with `spendControls.allowedAssets` lovelace ≤ 2000000, and a hook that refuses a second payload and any requirement other than lovelace ≤ 2 tADA to the payee on `cardano:preprod`.
+  - Records the tx hash (decoded from the signed payload) **before** the payload reaches the server. Then polls Blockfrost `/txs/{hash}` and `/txs/{hash}/utxos` for up to 10 min.
+  - Refuses to run unless the payer has ≥ 3 tADA. Refuses a second run if any earlier `live-test-*.json` is not `failed_before_signing`, and prints inspection steps.
+- Offline check (no Blockfrost call): an unpaid `GET /paid-test` returned 402 with `x402Version 2` and `accepts[0] = {scheme:"exact", network:"cardano:preprod", amount:"1000000", asset:"lovelace", payTo, maxTimeoutSeconds:600, extra:{areFeesSponsored:false, confirmationPolicy:{l1Confirmations:0}}}`. The SDK drops `assetTransferMethod:"default"` from the wire `extra`.
+
+Wallets created fresh for this project (addresses only; mnemonics in `.local/x402/`, git-ignored):
+- payer: `addr_test1qqp5a9cwecr7yh9arg8hu4c28v40jsrr44qpqgq690suhp5e6fwja63vqpj23ygdd6tawcw6r25lk7aulyyfeue4exsqjdtqf8`
+- payee: `addr_test1qqsukwn3txs33kx4qh97g5suejsc6w78x994j7y6sefsk29vnt2urqy4t5rmhddtmprmhpfuueuupmd7kaez7ganq3xs5usuqq`
+
+Payer balance: **not measured yet.** `node --env-file=.env x402/wallets.mjs balance payer` failed with `.env: not found` (no `.env` in the repo root at this time).
+
+### Phase B: measured payment
+
+Pending user funding of the payer and approval to run `node --env-file=.env x402/live-test.mjs --confirm-live-payment`.
