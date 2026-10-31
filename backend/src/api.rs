@@ -43,7 +43,7 @@ pub struct ApiError {
 }
 
 impl ApiError {
-    fn new(status: StatusCode, code: &'static str, message: impl Into<String>) -> Self {
+    pub(crate) fn new(status: StatusCode, code: &'static str, message: impl Into<String>) -> Self {
         Self {
             status,
             code,
@@ -55,7 +55,7 @@ impl ApiError {
         Self::new(StatusCode::BAD_REQUEST, "invalid_request", message)
     }
 
-    fn unauthorized() -> Self {
+    pub(crate) fn unauthorized() -> Self {
         Self::new(
             StatusCode::UNAUTHORIZED,
             "unauthorized",
@@ -151,13 +151,15 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/checks/{check_id}/xml", get(get_check_xml))
         .route("/v1/decisions", post(post_decision))
         .route("/health", get(health))
+        .merge(crate::payouts::routes())
+        .merge(crate::history::routes())
         .fallback(|| async { ApiError::new(StatusCode::NOT_FOUND, "not_found", "unknown route") })
         .layer(DefaultBodyLimit::max(body_limit))
         .with_state(state)
 }
 
 /// FR-08: `Authorization: Bearer <token>`, compared in constant time.
-fn authorize(state: &AppState, headers: &HeaderMap) -> Result<(), ApiError> {
+pub(crate) fn authorize(state: &AppState, headers: &HeaderMap) -> Result<(), ApiError> {
     let presented = headers
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
