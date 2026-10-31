@@ -5,7 +5,7 @@
 // live payment. One process per journal file: the read-modify-write steps are synchronous, so they are atomic in-process.
 import {readFileSync} from 'node:fs';
 import {x402ResourceServer,x402HTTPResourceServer,HTTPFacilitatorClient} from '@x402/core/server';
-import {decodePaymentSignatureHeader,encodePaymentResponseHeader} from '@x402/core/http';
+import {decodePaymentSignatureHeader,decodePaymentRequiredHeader,encodePaymentResponseHeader} from '@x402/core/http';
 import {CARDANO_ADDRESS_REGEX} from '@x402/cardano';
 import {ExactCardanoScheme as ExactCardanoServer} from '@x402/cardano/exact/server';
 import {NETWORK} from './wallets.mjs';
@@ -122,6 +122,15 @@ function sendInstructions(res,response){
  res.end(JSON.stringify(response.isHtml?{}:response.body??{}));
 }
 
+// A payment offer refused before settlement (verify failed, no matching requirements, bad payload). The x402 402 carries the
+// reason only inside the PAYMENT-REQUIRED header; repeat it in the body. submitted:false = this gate never ran settle for this tx.
+function sendRejectedOffer(res,response,submitted){
+ let reason='payment_rejected';
+ const header=Object.entries(response.headers||{}).find(([key])=>key.toLowerCase()==='payment-required')?.[1];
+ try{const error=header&&decodePaymentRequiredHeader(header).error;if(typeof error==='string'&&error)reason=error.slice(0,500);}catch{}
+ sendInstructions(res,{...response,isHtml:false,body:{error:'verify_failed',reason,...submitted===false?{submitted:false}:{}}});
+}
+
 function setReceipt(res,settlement){
  if(settlement)res.setHeader('PAYMENT-RESPONSE',encodePaymentResponseHeader({success:true,...settlement,errorReason:undefined}));
 }
@@ -185,7 +194,12 @@ export function x402Gate({priceLovelace,payTo,facilitator,facilitatorUrl,resourc
   await initialize();
   const context={adapter:adapterFor(req,url),path:url.pathname,method:req.method};
   const result=await httpServer.processHTTPRequest(context);
-  if(result.type==='payment-error'){sendInstructions(res,result.response);return null;}
+  if(result.type==='payment-error'){
+   if(!headerValue(req,'payment-signature')){sendInstructions(res,result.response);return null;}
+   // Re-read: only a tx with no gate journal entry can be said to be unsubmitted by this gate.
+   sendRejectedOffer(res,result.response,offered&&!entryOf(readGateJournal(journalPath),offered)?false:undefined);
+   return null;
+  }
   if(result.type!=='payment-verified')throw new GateError(500,'payment_gate_misconfigured');
 
   let txHash;

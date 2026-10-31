@@ -325,9 +325,9 @@ test('an unknown investigator payment stops the case for inspection: no LLM, no 
  });
 });
 
-test('a payment that failed before signing leaves that investigator unpaid → rejected/formal',async()=>{
- await withCase(async(store,caseId)=>{
-  const m=mocks({payFails:{supplier:'failed_before_signing'}});
+test('a payment that failed before signing, or was proven unable to land, leaves that investigator unpaid → rejected/formal',async()=>{
+ for(const phase of ['failed_before_signing','rejected'])await withCase(async(store,caseId)=>{
+  const m=mocks({payFails:{supplier:phase}});
   const state=await runCase(caseId,deps(store,m));
   assert.equal(state.steps.investigation.reports.supplier.status,'unpaid');
   assert.deepEqual([m.calls.decisions[0].decision,m.calls.decisions[0].reason_type],['rejected','formal']);

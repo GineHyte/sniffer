@@ -185,8 +185,9 @@ async function payInvestigators(ctx){
   }catch(error){
    let journal;
    try{journal=readPayJournal(payJournalPath(journalDir,key));}catch{journal={phase:'unreadable'};}
-   if(!journal||journal.phase==='failed_before_signing'){
-    // Nothing was signed: the investigator is not paid, so it will not run. Its report counts as missing (fail closed).
+   if(!journal||journal.phase==='failed_before_signing'||journal.phase==='rejected'){
+    // Nothing was signed, or the signed tx provably can never land: the investigator is not paid, so it will not run.
+    // Its report counts as missing (fail closed).
     save(state=>{state.steps.investigation.payments[role]={phase:'failed',error:clip(error?.message),at:iso(deps.clock.now())};});
     deps.log?.(`case=${caseId} event=investigator_payment_failed role=${role}`);
     continue;

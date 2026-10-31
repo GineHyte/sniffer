@@ -191,6 +191,8 @@ test('invalid verify never settles',async()=>{
   const response=await pay(`${base}/pay/task-a`,paymentHeader(await requirementsFor(`${base}/pay/task-a`),fakeTx(8)));
   assert.equal(response.status,402);
   assert.equal(decodePaymentRequiredHeader(response.headers.get('PAYMENT-REQUIRED')).error,'invalid_exact_cardano_payload_signature');
+  // Machine-readable for the payer (the live 2026-10-31 rejection answered a bare {}).
+  assert.deepEqual(await response.json(),{error:'verify_failed',reason:'invalid_exact_cardano_payload_signature',submitted:false});
   assert.equal(facilitator.calls.settle,0);
   assert.deepEqual(readGateJournal(journalPath).payments,{});
  });

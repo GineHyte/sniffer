@@ -189,6 +189,9 @@ if (paymentResponse) {
 Facts:
 - **Nonce:** `payload.nonce` is a UTXO ref (`txHash#index`) that must be one of the tx inputs. The facilitator checks that it and all inputs are unspent before submit (spec rule 5).
   - The reference client signer takes **`utxos[0]` of the wallet** as nonce (`dist/esm/index.mjs`, `toClientCardanoSigner`).
+  - Measured 2026-10-31 (case `case-7c525f29…`): that list comes from Blockfrost `/addresses/{addr}/utxos` (via evolution-sdk `getWalletUtxos`; `build()` re-reads it for coin selection) and **lags the chain**. Invoice tx `544864fc…` spent `5814fa9e…#0` and confirmed; the next payment 1 ms later signed `5814fa9e…#0` again (tx `95f10775…`, never on chain), the investigator gate's verify refused it, and Main stopped with `investigator_payment_unknown`.
+  - Fix in `x402/pay.mjs`: `payOnce` wraps the signer (`avoidSpentInputs`). A signed tx that spends an input recorded by our earlier payments (in-process per wallet, plus `nonce`/`inputs` of paid/unknown/pending journals in the same journal dir) is discarded unsent and rebuilt every 3 s, for at most 60 s. After that the call fails as `failed_before_signing`.
+  - With a `chain` (`x402/chain.mjs`, Blockfrost `consumed_by_tx`), an unconfirmed signed payment becomes `rejected` instead of `unknown` only if one of its inputs is consumed on chain by another tx with ≥ 2 confirmations, because such a tx can never land. The gate now answers a refused offer with `{error:"verify_failed",reason,submitted?:false}`. The payer records that answer but does not trust it as proof.
 - **Duplicate-settlement guard:** settle is keyed by tx id. One tx is broadcast at most once, and a concurrent second settle gets `duplicate_settlement`.
   - **A retry of an already-broadcast tx "resumes observation instead of submitting again".**
   - The store is in-memory by default, holds 4096 entries and evicts the oldest.

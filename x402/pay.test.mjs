@@ -7,7 +7,7 @@ import {join} from 'node:path';
 import {setTimeout as sleep} from 'node:timers/promises';
 import {encodePaymentRequiredHeader,encodePaymentResponseHeader,decodePaymentSignatureHeader} from '@x402/core/http';
 import {decodeCardanoTransaction} from '@x402/cardano';
-import {payOnce,payJournalPath,readPayJournal,writeJsonAtomic,createKeyedQueue} from './pay.mjs';
+import {payOnce,payJournalPath,readPayJournal,writeJsonAtomic,createKeyedQueue,journaledInputs} from './pay.mjs';
 import {x402Gate} from './gate.mjs';
 
 const NETWORK='cardano:preprod';
@@ -23,7 +23,9 @@ function fakeTx(seed){
 }
 
 // Mock ClientCardanoSigner: signs nothing real, records calls, optionally inspects the journal at signing time.
-function mockSigner({address=PAYER,onSign}={}){
+// Each mock is its own wallet by default: payOnce remembers spent inputs per wallet for the whole process.
+let wallets=0;
+function mockSigner({address=`${PAYER}${wallets+=1}`,onSign}={}){
  let seed=0;
  const signer={signed:0,getAddress:()=>address,
   buildAndSignPaymentTransaction:async requirements=>{signer.signed+=1;seed+=1;await onSign?.(requirements);return fakeTx(seed);}};
@@ -196,6 +198,116 @@ test('end to end against the gate: pay, then a second key for the same resource 
   assert.equal(second.phase,'paid');assert.equal(second.paymentMade,false);assert.equal(second.txHash,first.txHash);
   assert.equal(signer.signed,1);assert.equal(calls.settle,1);
   assert.equal(existsSync(join(dir,'gate.json')),true);
+ }finally{
+  await new Promise(resolve=>server.close(()=>resolve()));
+  rmSync(dir,{recursive:true,force:true});
+ }
+});
+
+// One input, fixed output; the fee varies the tx id.
+function txSpending(input,fee){
+ const hex='84a3'+'0081825820'+input+'00'+'0181'+'82581d'+'60'+'07'.repeat(28)+'1a000f4240'+'021a'+(0x29810+fee).toString(16).padStart(8,'0')+'a0f5f6';
+ const transaction=Buffer.from(hex,'hex').toString('base64');
+ return {transaction,nonce:`${input}#0`,txHash:decodeCardanoTransaction(transaction).txHash};
+}
+
+// Like toClientCardanoSigner over Blockfrost /addresses/{addr}/utxos: spends the first listed UTxO. A spent input stays listed
+// for lagListings more listings (indexer lag). The fetch rejects a tx whose input is already spent, as the facilitator's verify does.
+function laggingWallet({lagListings}){
+ const ref=seed=>Buffer.alloc(32,seed).toString('hex');
+ const unspent=[ref(0xa1),ref(0xb2)],ghosts=new Map(),built=new Map(),address=`${PAYER}lag${wallets+=1}`;
+ const signer={listings:[],getAddress:()=>address,
+  buildAndSignPaymentTransaction:async()=>{
+   const view=[...ghosts.keys(),...unspent];
+   for(const [input,left] of ghosts)left<=1?ghosts.delete(input):ghosts.set(input,left-1);
+   signer.listings.push(view);
+   const tx=txSpending(view[0],signer.listings.length);
+   built.set(tx.txHash,view[0]);
+   return {transaction:tx.transaction,nonce:tx.nonce};
+  }};
+ const fetchImpl=mockServer({settle:txHash=>{
+  const input=built.get(txHash);
+  if(!unspent.includes(input))return {success:false,errorReason:'invalid_exact_cardano_payload_utxo_spent',network:NETWORK};
+  unspent.splice(unspent.indexOf(input),1);ghosts.set(input,lagListings);
+  return {success:true,transaction:txHash,network:NETWORK,payer:PAYER,extra:{status:'confirmed',confirmations:0}};
+ }});
+ return {signer,fetchImpl,a:`${ref(0xa1)}#0`,b:`${ref(0xb2)}#0`};
+}
+
+test('named bug (case-7c525f29…, 2026-10-31): a lagging UTxO view never makes the next payment re-spend the previous input',async()=>{
+ const dir=temp();
+ try{
+  const {signer,fetchImpl,a,b}=laggingWallet({lagListings:2});
+  const sleeps=[];
+  const opts={signer,fetchImpl,utxoPollMs:7,utxoWaitMs:5000,sleep:async ms=>{sleeps.push(ms);}};
+  const invoice=await payOnce({...args(dir),url:'http://127.0.0.1:9/pay/task-a',key:'case1-invoice',...opts});
+  assert.equal(invoice.phase,'paid');assert.equal(invoice.nonce,a);assert.deepEqual(invoice.inputs,[a]);
+  const wallet=await payOnce({...args(dir),url:'http://127.0.0.1:9/pay/task-b',key:'case1-wallet',...opts});
+  assert.equal(wallet.phase,'paid');assert.equal(wallet.nonce,b,'must not re-spend the invoice input');
+  assert.deepEqual(signer.listings.slice(1).map(view=>`${view[0]}#0`),[a,a,b],'stale listings are rebuilt, never sent');
+  assert.deepEqual(sleeps,[7,7]);
+  assert.deepEqual(fetchImpl.events.filter(event=>event.startsWith('paid')).length,2,'exactly one offer per payment');
+  assert.deepEqual(journaledInputs(dir,invoice.wallet).sort(),[a,b]);
+  assert.deepEqual(journaledInputs(dir,'addr_test1vqanotherwallet'),[],'journals count per wallet');
+ }finally{rmSync(dir,{recursive:true,force:true});}
+});
+
+test('a UTxO view that never catches up fails before anything is sent; journaled inputs count after a restart too',async()=>{
+ const dir=temp();
+ try{
+  const {signer,fetchImpl,a}=laggingWallet({lagListings:1e9});
+  const opts={signer,fetchImpl,utxoPollMs:1,utxoWaitMs:20,sleep:()=>sleep(2)};
+  assert.equal((await payOnce({...args(dir),key:'case1-invoice',...opts})).phase,'paid');
+  await assert.rejects(payOnce({...args(dir),key:'case1-wallet',...opts}),/still lists[\s\S]*Nothing was sent/);
+  const journal=readPayJournal(payJournalPath(dir,'case1-wallet'));
+  assert.equal(journal.phase,'failed_before_signing');assert.equal(journal.txHash,undefined);
+  assert.equal(fetchImpl.events.filter(event=>event.startsWith('paid')).length,1);
+  // A fresh process only has the journals: the same wallet's paid journal still blocks its input.
+  const restarted={getAddress:()=>signer.getAddress(),buildAndSignPaymentTransaction:async()=>{const tx=txSpending(a.slice(0,64),99);return {transaction:tx.transaction,nonce:tx.nonce};}};
+  assert.deepEqual(journaledInputs(dir,signer.getAddress(),payJournalPath(dir,'other')),[a]);
+  await assert.rejects(payOnce({...args(dir),key:'case1-supplier',signer:restarted,fetchImpl,utxoPollMs:1,utxoWaitMs:5}),/still lists/);
+ }finally{rmSync(dir,{recursive:true,force:true});}
+});
+
+test('a gate verify rejection becomes rejected only with chain proof; otherwise unknown',async()=>{
+ const dir=temp();
+ let verifyOk=false;
+ const facilitator={
+  getSupported:async()=>({kinds:[{x402Version:2,scheme:'exact',network:NETWORK}],extensions:[],signers:{}}),
+  verify:async()=>verifyOk?{isValid:true,payer:PAYER}:{isValid:false,invalidReason:'invalid_exact_cardano_payload_utxo_spent'},
+  settle:async payload=>({success:true,transaction:decodeCardanoTransaction(payload.payload.transaction).txHash,network:NETWORK,payer:PAYER,extra:{status:'confirmed',confirmations:0}}),
+ };
+ const gate=x402Gate({priceLovelace:'1000000',payTo:PAY_TO,facilitator,journalPath:join(dir,'gate.json'),resourceId:req=>req.url.split('/')[2]});
+ const server=createServer(async(req,res)=>{if(await gate(req,res)){res.setHeader('content-type','application/json');res.end('{"status":"paid"}');}});
+ await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
+ const other='9a'.repeat(32);
+ const chainWith=spent=>({spentBy:async()=>spent});
+ try{
+  const url=key=>`http://127.0.0.1:${server.address().port}/pay/${key}`;
+  const run=(key,chain,signer=mockSigner())=>payOnce({...args(dir),url:url(key),key,signer,chain,utxoPollMs:1,utxoWaitMs:10});
+  // No proof: input unspent, too shallow, or no chain at all.
+  for(const [key,chain] of [['k-unspent',chainWith(null)],['k-shallow',chainWith({txHash:other,confirmations:1})],['k-nochain',undefined]]){
+   await assert.rejects(run(key,chain),/inspect/i);
+   const journal=readPayJournal(payJournalPath(dir,key));
+   assert.equal(journal.phase,'unknown');
+   assert.deepEqual(JSON.parse(journal.response.body),{error:'verify_failed',reason:'invalid_exact_cardano_payload_utxo_spent',submitted:false});
+   assert.equal(journal.response.paymentRequiredError,'invalid_exact_cardano_payload_utxo_spent');
+  }
+  // Proof: the input is consumed on chain by another tx, deep enough. A rejected key may pay again.
+  const signer=mockSigner();
+  await assert.rejects(run('k-proven',chainWith({txHash:other,confirmations:2}),signer),/can never land/);
+  const rejected=readPayJournal(payJournalPath(dir,'k-proven'));
+  assert.equal(rejected.phase,'rejected');
+  assert.deepEqual([rejected.rejection.input,rejected.rejection.spentBy,rejected.rejection.confirmations],[rejected.nonce,other,2]);
+  verifyOk=true;
+  const paid=await run('k-proven',chainWith(null),signer);
+  assert.equal(paid.phase,'paid');assert.equal(paid.attempt,2);assert.equal(paid.previousAttempts[0].txHash,rejected.txHash);
+  // Our own tx consuming the input is never "rejected".
+  verifyOk=false;
+  const own=mockSigner();
+  await assert.rejects(payOnce({...args(dir),url:url('k-own'),key:'k-own',signer:own,utxoPollMs:1,utxoWaitMs:10,
+   chain:{spentBy:async()=>({txHash:readPayJournal(payJournalPath(dir,'k-own')).txHash,confirmations:9})}}),/inspect/i);
+  assert.equal(readPayJournal(payJournalPath(dir,'k-own')).phase,'unknown');
  }finally{
   await new Promise(resolve=>server.close(()=>resolve()));
   rmSync(dir,{recursive:true,force:true});

@@ -158,14 +158,15 @@ const log=line=>console.error(`[main] ${line}`);
 async function main(argv){
  if(!argv.includes(CONFIRM_FLAG))throw new Error(`Refusing to start without ${CONFIRM_FLAG}. This API pays investigators and suppliers with real Preprod tADA.`);
  const config=loadConfig();
- const [{x402Gate},{createInProcessFacilitator,blockfrostProvider},{readWallet,NETWORK},{toClientCardanoSigner},{payOnce},{sokosumi},client,{Client},payoutModule,{createSnifferClient},{loadCustomerTexts}]=await Promise.all([
-  import('../x402/gate.mjs'),import('../x402/facilitator.mjs'),import('../x402/wallets.mjs'),import('@x402/cardano'),import('../x402/pay.mjs'),
+ const [{x402Gate},{createInProcessFacilitator,blockfrostProvider},{readWallet,NETWORK},{toClientCardanoSigner},{payOnce},{blockfrostChain},{sokosumi},client,{Client},payoutModule,{createSnifferClient},{loadCustomerTexts}]=await Promise.all([
+  import('../x402/gate.mjs'),import('../x402/facilitator.mjs'),import('../x402/wallets.mjs'),import('@x402/cardano'),import('../x402/pay.mjs'),import('../x402/chain.mjs'),
   import('../sokosumi-cli.mjs'),import('../client.mjs'),import('eve/client'),import('../payout/transfer.mjs'),import('./backend.mjs'),import('./decide.mjs')]);
  const store=createCaseStore(config.stateDir);
  const gate=x402Gate({priceLovelace:config.intake.priceLovelace,payTo:config.intake.payTo,facilitator:createInProcessFacilitator(),
   resourceId:req=>req.snifferResourceId,journalPath:join(config.stateDir,'intake-gate.json'),description:'Sniffer invoice check',onError:error=>log(`event=gate_error error=${String(error?.message).slice(0,200)}`)});
  const wallet=readWallet(config.payerWallet);
  const payer=toClientCardanoSigner({mnemonic:wallet.mnemonic,network:NETWORK,provider:blockfrostProvider(process.env.BLOCKFROST_API_KEY_PREPROD)});
+ const chain=blockfrostChain({projectId:process.env.BLOCKFROST_API_KEY_PREPROD});
  const eve=new Client({host:config.eveUrl});
  const payoutBackend=payoutModule.createBackendClient();
  const {mnemonic,accountIndex}=payoutModule.loadPayoutSecrets();
@@ -174,7 +175,8 @@ async function main(argv){
   config,store,log,
   backend:createSnifferClient(),
   sokosumi:args=>sokosumi(args),
-  payOnce,payer,
+  // chain lets payOnce journal a provably unlandable payment as rejected instead of unknown.
+  payOnce:options=>payOnce({...options,chain}),payer,
   answerReport:(role,input,journal,deadline)=>client.answerReport(role,input,journal,deadline,{client:eve}),
   validateReport:client.validateReport,
   runPayout:({checkId})=>payoutModule.runPayout({checkId,backend:payoutBackend,signer:payoutSigner}),
