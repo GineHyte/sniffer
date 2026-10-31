@@ -8,7 +8,7 @@ import {fileURLToPath} from 'node:url';
 import {parseArgs,assertConfirmed,prepareXml,duePayableCents,payoutLovelace,caseIdFromJournal,pollCase,progressLine,payKeyFor,
  follow,formatElapsed,trackMilestones,timingLines,failureMessage,intakeRefusal,payoutUnconfirmed,DEFAULT_CONFIRM_WAIT_MS,
  normalizeVat,supplierHash,sellerVat,validMockVats,openOrderFor,supplierRewrite,pickFreshSupplier,resolveSupplier,expectedOutcome,supplierLines,
- supplierLookups,readRepoJson,VIES_MOCK_FILE,OPEN_ORDERS_FILE,CONFIRM_FLAG,DEFAULT_FIXTURE,DEFAULT_TIMEOUT_MS,DEFAULT_POLL_MS,
+ sellerContact,supplierLookups,readRepoJson,VIES_MOCK_FILE,OPEN_ORDERS_FILE,CONFIRM_FLAG,DEFAULT_FIXTURE,DEFAULT_TIMEOUT_MS,DEFAULT_POLL_MS,
  freshWalletName,resolveRecipient} from './demo-case.mjs';
 import {intakeIds} from '../main/case-store.mjs';
 import {PAY_KEY_REGEX} from '../x402/pay.mjs';
@@ -265,24 +265,48 @@ test('supplierHash matches the backend vector (hashing.rs) and its VAT normaliza
  for(const bad of ['',KEY.slice(0,62),`${KEY}a`,`${KEY.slice(0,62)}zz`,undefined])assert.throws(()=>supplierHash(bad,'DE111111111'),/SNIFFER_HMAC_KEY/);
 });
 
-test('prepareXml rewrites only the seller VAT (BT-31), seller name (BT-27) and order reference (BT-13)',()=>{
+test('prepareXml rewrites only the seller VAT (BT-31), seller name (BT-27) with its contact, and order reference (BT-13)',()=>{
  const out=prepareXml(F1,{supplierVat:'DE222222222',supplierName:'Müller & Söhne GmbH',orderReference:'PO-2026-002'});
+ assert.ok(out.includes('<ram:PersonName>Maria Müller</ram:PersonName>'));
  assert.equal(sellerVat(F1),'DE111111111');
  assert.equal(sellerVat(out),'DE222222222');
  assert.ok(out.includes('<ram:SellerTradeParty>\n        <ram:Name>Müller &amp; Söhne GmbH</ram:Name>'));
  assert.ok(out.includes('<ram:ID schemeID="VA">DE999999999</ram:ID>'),'buyer VAT unchanged');
  assert.ok(out.includes('<ram:Name>Käufer Handels AG</ram:Name>'),'buyer name unchanged');
  assert.ok(out.includes('<ram:IssuerAssignedID>PO-2026-002</ram:IssuerAssignedID>'));
- const back=out.replace('DE222222222','DE111111111').replace('Müller &amp; Söhne GmbH','Alpha Consulting GmbH').replace('PO-2026-002','PO-2026-001');
+ const back=out.replace('DE222222222','DE111111111').replace('Müller &amp; Söhne GmbH','Alpha Consulting GmbH').replace('PO-2026-002','PO-2026-001')
+  .replace('Maria Müller','Anna Alpha').replaceAll('rechnung@mueller-soehne.example','rechnung@alpha-consulting.example');
  assert.equal(back,F1,'nothing else changes');
  assert.notEqual(intakeIds(out).caseId,intakeIds(F1).caseId);
  assert.equal(sellerVat(prepareXml(F1,{supplierName:'Beta GmbH'})),'DE111111111');
  assert.equal(prepareXml(F1,{supplierVat:'DE111111111'}),F1);
+ assert.equal(prepareXml(F1,supplierRewrite('DE111111111',{orders:readRepoJson(OPEN_ORDERS_FILE)})),F1,'the fixture supplier keeps its bytes and case id');
  assert.throws(()=>prepareXml(F1,{supplierVat:'de1'}),/Invalid supplier VAT/);
  assert.throws(()=>prepareXml(F1,{supplierName:'<b>'}),/Invalid supplier name/);
  assert.throws(()=>prepareXml(F1,{orderReference:'a b'}),/Invalid order reference/);
  assert.throws(()=>prepareXml(F1.replace(/<ram:SellerTradeParty>[\s\S]*?<\/ram:SellerTradeParty>/,''),{supplierVat:'DE222222222'}),/no seller/);
  assert.throws(()=>prepareXml(F1.replace(/<ram:BuyerOrderReferencedDocument>[\s\S]*?<\/ram:BuyerOrderReferencedDocument>/,''),{orderReference:'PO-1'}),/BT-13/);
+});
+
+// Named bug (live 2026-10-31): --new-supplier renamed the seller to Gamma Services GmbH but kept the Alpha contact
+// (Anna Alpha, rechnung@alpha-consulting.example); the supplier investigator flagged the mismatch, so the case could never approve.
+test('a rewritten supplier gets a matching seller contact and e-mails, buyer fields stay unchanged',()=>{
+ const seller=xml=>/<ram:SellerTradeParty>[\s\S]*?<\/ram:SellerTradeParty>/.exec(xml)[0];
+ const outside=xml=>xml.replace(seller(xml),'');
+ for(const rewrite of [supplierRewrite('DE333333333'),supplierRewrite('DE555555555'),{supplierName:'Müller & Söhne GmbH'}]){
+  const out=prepareXml(F1,rewrite);
+  assert.doesNotMatch(seller(out),/alpha/i,rewrite.supplierName);
+  const {person,email}=sellerContact(rewrite.supplierName);
+  assert.ok(seller(out).includes(`<ram:PersonName>${person.replace('&','&amp;')}</ram:PersonName>`));
+  assert.equal(seller(out).split(`>${email}</ram:URIID>`).length,3,'contact and electronic address');
+  assert.match(email,/^rechnung@[a-z0-9-]+\.example$/);
+  assert.equal(outside(out),outside(F1),'buyer and everything outside the seller unchanged');
+ }
+ assert.deepEqual(sellerContact('Gamma Services GmbH'),{person:'Greta Gamma',email:'rechnung@gamma-services.example'});
+ assert.deepEqual(sellerContact('Alpha Consulting GmbH'),{person:'Anna Alpha',email:'rechnung@alpha-consulting.example'});
+ assert.deepEqual(sellerContact('Müller & Söhne GmbH'),{person:'Maria Müller',email:'rechnung@mueller-soehne.example'});
+ assert.deepEqual(sellerContact('Lieferant DE777777777 GmbH'),{person:'Lena Lieferant',email:'rechnung@lieferant-de777777777.example'});
+ assert.equal(sellerContact('GmbH').email,'rechnung@lieferant.example');
 });
 
 test('supplier candidates come from the VIES mock; a new VAT takes its own open order and a name',()=>{

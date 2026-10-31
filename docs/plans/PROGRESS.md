@@ -100,7 +100,7 @@ T25 notes:
 T26 decisions (user, 2026-10-31):
 - Q1: a failed `tasks create` triggers a read-only `tasks list` check; exactly one match → continue, provably none → recreate (bounded), otherwise inspection.
 - Q2: resend `POST /v1/initial-check` only on a connect error (nothing reached Rust); anything else → inspection.
-- Q3: an unsigned investigator payment failure → rejected/formal immediately (unchanged).
+- Q3: an unsigned investigator payment failure → rejected/formal. Update (user decision 2026-10-31, after case-833a92c7… lost the invoice payment to a transient Blockfrost `getProtocolParameters` error): a payOnce journal in `failed_before_signing` is retried up to 3 times after 2 s, 5 s, 10 s (4 attempts, `investigator_payment_retry` log, attempt journaled in case.json); only then rejected/formal. `rejected`, `pending`, `unknown` and other signed states are never retried.
 - Q5: `.local/payout.env` stays required at Main startup.
 - Main LLM failure or invalid JSON → rejected/formal. Decline reasons are built by code only (fixed German texts + criterion `customer_text`), filtered for betrug/fraud.
 - Suggested script: `"main": "node --env-file-if-exists=.env main/api.mjs"`, run with `--confirm-live-payments`.

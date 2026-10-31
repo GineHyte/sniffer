@@ -9,7 +9,7 @@
 // Poll an existing case without paying: npm run demo -- --case case-<32 hex>
 // One payment per submitted XML: the payOnce key is derived from the XML hash, so a rerun returns the earlier
 // payment and only polls. Use --invoice-number for a new case (the backend rejects an exact duplicate with KO-3).
-// --new-supplier swaps the seller (BT-31 VAT, BT-27 name, BT-13 open order) for the first VIES-mock-valid VAT the backend has no
+// --new-supplier swaps the seller (BT-31 VAT, BT-27 name with its contact and e-mails, BT-13 open order) for the first VIES-mock-valid VAT the backend has no
 // invoice for (GET /v1/suppliers/{supplier_hash}/history = 404), so S-9 fires again and the case reaches the investigators.
 // --fresh-wallet creates a new local x402 wallet demo-recipient-<ms> (x402/wallets.mjs createWallet, mnemonic stays in
 // .local/x402/) and pays the supplier to its never-used address, so S-1 (address approved for another supplier) cannot fire.
@@ -99,7 +99,7 @@ export function assertConfirmed(options){
 
 /**
  * Returns the XML to submit: the fixture, optionally with a new invoice number, payment address, seller VAT ID (BT-31),
- * seller name (BT-27) and order reference (BT-13). Pure.
+ * seller name (BT-27, with a matching seller contact BT-41 and e-mails BT-43/BT-34) and order reference (BT-13). Pure.
  */
 export function prepareXml(xml,{invoiceNumber=null,recipientAddress=null,supplierVat=null,supplierName=null,orderReference=null}={}){
  if(typeof xml!=='string'||!xml.includes('<rsm:CrossIndustryInvoice'))throw new Error('Fixture is not a CII invoice.');
@@ -133,6 +133,10 @@ export function prepareXml(xml,{invoiceNumber=null,recipientAddress=null,supplie
    const re=/(<ram:SellerTradeParty>\s*<ram:Name>)[^<]*(<\/ram:Name>)/;
    if(!re.test(block))throw new Error('Fixture has no seller name (BT-27).');
    block=block.replace(re,(_,open,close)=>`${open}${escapeXml(supplierName)}${close}`);
+   // The seller contact (BT-41) and e-mails (BT-43, BT-34) follow the name, or the supplier investigator flags the mismatch.
+   const contact=sellerContact(supplierName);
+   block=block.replace(/(<ram:DefinedTradeContact>\s*<ram:PersonName>)[^<]*(<\/ram:PersonName>)/,(_,open,close)=>`${open}${escapeXml(contact.person)}${close}`)
+    .replace(/(<ram:URIID\b[^>]*>)[^<@]*@[^<]*(<\/ram:URIID>)/g,(_,open,close)=>`${open}${contact.email}${close}`);
   }
   out=out.slice(0,seller.index)+block+out.slice(seller.index+seller[0].length);
  }
@@ -143,6 +147,20 @@ export function prepareXml(xml,{invoiceNumber=null,recipientAddress=null,supplie
   out=out.replace(re,(_,open,close)=>`${open}${orderReference}${close}`);
  }
  return out;
+}
+
+const GIVEN_NAMES=Object.freeze({A:'Anna',B:'Bernd',C:'Clara',D:'David',E:'Emil',F:'Frieda',G:'Greta',H:'Hanna',I:'Ida',J:'Jonas',K:'Karl',L:'Lena',M:'Maria',
+ N:'Nina',O:'Otto',P:'Paula',Q:'Quirin',R:'Rosa',S:'Sophie',T:'Theo',U:'Uwe',V:'Vera',W:'Willi',X:'Xaver',Y:'Yvonne',Z:'Zoe'});
+const LEGAL_FORMS=/\b(?:gmbh|mbh|ag|kg|kgaa|ohg|gbr|ug|se|ek|e\s*k|ev|e\s*v|co|haftungsbeschraenkt|ltd|llc|inc|sarl|bv|nv|srl|spa|sa)\b/gu;
+const ascii=value=>value.replace(/ä/g,'ae').replace(/ö/g,'oe').replace(/ü/g,'ue').replace(/Ä/g,'Ae').replace(/Ö/g,'Oe').replace(/Ü/g,'Ue').replace(/ß/g,'ss')
+ .normalize('NFD').replace(/[\u0300-\u036f]/g,'');
+
+/** Seller contact for a supplier name, deterministic: 'Alpha Consulting GmbH' -> Anna Alpha, rechnung@alpha-consulting.example. */
+export function sellerContact(name){
+ const word=String(name).split(/\s+/).map(w=>w.replace(/[^\p{L}\p{N}-]/gu,'')).find(w=>/\p{L}/u.test(w))??'Lieferant';
+ const person=`${GIVEN_NAMES[ascii(word)[0]?.toUpperCase()]??'Kim'} ${word}`;
+ const slug=ascii(String(name).toLowerCase()).replace(/[^a-z0-9]+/g,' ').replace(LEGAL_FORMS,' ').trim().replace(/\s+/g,'-').slice(0,63).replace(/-+$/,'')||'lieferant';
+ return {person,email:`rechnung@${slug}.example`};
 }
 
 const escapeXml=value=>value.replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&apos;'})[c]);
