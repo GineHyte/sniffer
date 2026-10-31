@@ -5,7 +5,7 @@ All facts were accessed on **2026-10-31**. Package facts come from npm registry 
 `npm pack` into a temporary directory (README, `.d.mts` types and `dist` source read as data, nothing executed).
 **UNVERIFIED** marks anything not confirmed by a primary source or by a measured run.
 
-Still open for Task 21: one measured Preprod payment (tx hash) between two fresh test wallets, made with user approval.
+Update 2026-10-31: the measured Preprod payment is done (tx `7feeb885…b07b`, see "Live test", Phase B). The status line above describes the research phase only.
 
 ---
 
@@ -318,8 +318,14 @@ Wallets created fresh for this project (addresses only; mnemonics in `.local/x40
 - payer: `addr_test1qqp5a9cwecr7yh9arg8hu4c28v40jsrr44qpqgq690suhp5e6fwja63vqpj23ygdd6tawcw6r25lk7aulyyfeue4exsqjdtqf8`
 - payee: `addr_test1qqsukwn3txs33kx4qh97g5suejsc6w78x994j7y6sefsk29vnt2urqy4t5rmhddtmprmhpfuueuupmd7kaez7ganq3xs5usuqq`
 
-Payer balance: **not measured yet.** `node --env-file=.env x402/wallets.mjs balance payer` failed with `.env: not found` (no `.env` in the repo root at this time).
+Payer balance before Phase B (measured 2026-10-31 after the user funded it from the faucet): **100.000000 tADA**.
 
-### Phase B: measured payment
+### Phase B: measured payment (2026-10-31, run with user approval). **Settled and confirmed.**
 
-Pending user funding of the payer and approval to run `node --env-file=.env x402/live-test.mjs --confirm-live-payment`.
+Command: `node --env-file=.env x402/live-test.mjs --confirm-live-payment`. The script journal phase is `confirmed`; the journal is in `.local/x402/live-test-2026-10-31T01-00-26-793Z.json`.
+- tx hash: `7feeb885ff97026405b497045fb1a38cb2f820eb057dbbeae9855c406754b07b` (Cardano Preprod)
+- block `4abff23e24a60683b5c6c7e3ef0fb633d2680c33a087efc4568ffc8d5b2267ac`, height 5355202, `valid_contract: true`
+- Fee 170517 lovelace. Payee output index 0 pays **1000000 lovelace** to the payee address above.
+- Flow: protected route → 402 → client signs with the payer mnemonic → in-process facilitator verifies and submits → Blockfrost confirms the payee output.
+
+Go condition 1 (§7) is now met. Go condition 2, the cross-task replay test, is covered by `x402/gate.test.mjs` (Task 22).
