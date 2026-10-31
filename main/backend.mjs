@@ -5,6 +5,24 @@ export class SnifferApiError extends Error{
  constructor(message,{status,code}){super(message);this.name='SnifferApiError';this.status=status;this.code=code;}
 }
 
+// Socket-level codes that prove no TCP connection was established, so no request byte reached the server:
+// refused (RST on SYN), DNS lookup failed, no route. Deliberately excluded: any timeout (request or
+// UND_ERR_CONNECT_TIMEOUT), resets after connect (ECONNRESET, UND_ERR_SOCKET), TLS errors, aborts.
+export const CONNECT_FAILURE_CODES=Object.freeze(new Set(['ECONNREFUSED','ENOTFOUND','EAI_AGAIN','EAI_NONAME','EHOSTUNREACH','ENETUNREACH','EADDRNOTAVAIL']));
+
+/**
+ * True only if a fetch error proves the connection was never established. undici throws
+ * TypeError('fetch failed') with `cause` = the socket error ({code}); with several addresses (happy eyeballs)
+ * the cause is an AggregateError whose `errors` must all be connect failures.
+ */
+export function connectionNotEstablished(error,depth=0){
+ if(!error||typeof error!=='object'||depth>4)return false;
+ if(error.name==='AbortError'||error.name==='TimeoutError')return false;
+ if(Array.isArray(error.errors)&&error.errors.length)return error.errors.every(inner=>connectionNotEstablished(inner,depth+1));
+ if(typeof error.code==='string')return CONNECT_FAILURE_CODES.has(error.code);
+ return connectionNotEstablished(error.cause,depth+1);
+}
+
 const CHECK_ID_RE=/^chk_[0-9A-HJKMNP-TV-Z]{26}$/;
 const HASH_RE=/^hmac:[0-9a-f]{64}$/;
 export const assertCheckId=id=>{if(typeof id!=='string'||!CHECK_ID_RE.test(id))throw new Error('check_id must be chk_ + ULID');return id;};
@@ -28,7 +46,10 @@ export function createSnifferClient({baseUrl=process.env.SNIFFER_BASE_URL||'http
    const headers={authorization:`Bearer ${token}`,accept};
    if(body!==undefined)headers['content-type']='application/json';
    response=await fetchImpl(base+path,{method,headers,body:body===undefined?undefined:JSON.stringify(body),signal:AbortSignal.timeout(timeoutMs)});
-  }catch(error){throw new SnifferApiError(`Backend ${label} request failed (${error?.name||'Error'}).`,{status:0,code:'network_error'});}
+  }catch(error){
+   const notConnected=connectionNotEstablished(error);
+   throw new SnifferApiError(`Backend ${label} request failed (${notConnected?'connection not established':error?.name||'Error'}).`,{status:0,code:notConnected?'connect_failed':'network_error'});
+  }
   const text=await response.text().catch(()=>'');
   if(response.ok)return text;
   let code='http_error';

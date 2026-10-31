@@ -72,7 +72,7 @@ export function testConfig(overrides={}){
 }
 
 export function fakeClock(start=Date.parse('2026-10-31T10:00:00Z')){
- const clock={t:start,sleeps:0,now:()=>clock.t,sleep:async ms=>{clock.sleeps+=1;clock.t+=ms;}};
+ const clock={t:start,sleeps:0,delays:[],now:()=>clock.t,sleep:async ms=>{clock.sleeps+=1;clock.delays.push(ms);clock.t+=ms;}};
  return clock;
 }
 
@@ -92,8 +92,10 @@ export function seedCase(store,xml=F9_XML){
  * Recording mocks for every external dependency of runCase.
  * reports: role → (caseId, taskId) → report text | null (never completes) | {status:'FAILED'}.
  */
-export function mocks({band='medium',result=checkResult(band),reports={},llm='PAY',payFails={},payout}={}){
- const calls={initialCheck:0,getXml:0,history:0,decisions:[],getCheck:0,creates:[],gets:0,payments:[],llm:0,payouts:[]};
+// createPlan: role → per-attempt behaviour: 'ok' (default), 'fail_after' (task is created, then the CLI call fails),
+// 'fail_before' (CLI fails, nothing created). list: optional override (args, allTasks) → CLI output, or throws.
+export function mocks({band='medium',result=checkResult(band),reports={},llm='PAY',payFails={},payout,createPlan={},list}={}){
+ const calls={initialCheck:0,getXml:0,history:0,decisions:[],getCheck:0,creates:[],createAttempts:[],lists:[],gets:0,payments:[],llm:0,payouts:[]};
  let nextTask=1;
  const tasks=new Map();
  const backend={
@@ -107,11 +109,24 @@ export function mocks({band='medium',result=checkResult(band),reports={},llm='PA
   if(args[0]==='tasks'&&args[1]==='create'){
    const coworkerId=args[args.indexOf('--coworker-id')+1];
    const description=args[args.indexOf('--description')+1];
+   const name=args[args.indexOf('--name')+1];
    const role=ROLES.find(entry=>COWORKERS[entry]===coworkerId);
+   const attempt=calls.createAttempts.filter(entry=>entry===role).length;
+   calls.createAttempts.push(role);
+   const behaviour=createPlan[role]?.[attempt]??'ok';
+   if(behaviour==='fail_before')throw new Error('sokosumi CLI failed (connection)');
    const id=`task${nextTask++}`;
-   tasks.set(id,{role,coworkerId,description});
+   tasks.set(id,{id,role,coworkerId,description,name});
    calls.creates.push({role,id,description});
+   if(behaviour==='fail_after')throw new Error('sokosumi CLI timed out');
    return {task:{id,status:'READY',coworkerId},events:[],jobs:[]};
+  }
+  if(args[0]==='tasks'&&args[1]==='list'){
+   calls.lists.push(args);
+   const all=[...tasks.values()];
+   if(list)return list(args,all);
+   const coworkerId=args[args.indexOf('--coworker-id')+1];
+   return {tasks:all.filter(task=>task.coworkerId===coworkerId).map(task=>({id:task.id,name:task.name,description:task.description,status:'READY',coworkerId:task.coworkerId}))};
   }
   if(args[0]==='tasks'&&args[1]==='get'){
    calls.gets+=1;

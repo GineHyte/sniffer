@@ -171,17 +171,143 @@ test('restart after a crash right after a payment settled → payOnce journal re
  });
 });
 
-test('restart with a journaled but unconfirmed task creation → needs_inspection, no second create',async()=>{
+test('restart after a crash during task creation → read-only check adopts the created task, no second create',async()=>{
  await withCase(async(store,caseId)=>{
   const m=mocks();
   const crashing=crashOnce(store,state=>state.steps.investigation?.tasks?.wallet?.phase==='created');
   await assert.rejects(runCase(caseId,deps(crashing,m)),/simulated crash/);
   assert.equal(m.calls.creates.length,2);
   const state=await runCase(caseId,deps(store,m));
+  assert.equal(state.status,'completed',JSON.stringify(state.inspection));
+  assert.equal(m.calls.lists.length,1);
+  assert.equal(state.steps.investigation.tasks.wallet.task_id,m.calls.creates[1].id);
+  assert.equal(state.steps.investigation.tasks.wallet.found_by_check,true);
+  assert.deepEqual(m.calls.createAttempts,['invoice','wallet','supplier'],'wallet is never created twice');
+  assert.equal(m.calls.payments.length,3);
+ });
+});
+
+test('Q1: create fails after the task was created → exactly one match is adopted and the case continues',async()=>{
+ await withCase(async(store,caseId)=>{
+  const m=mocks({createPlan:{wallet:['fail_after']}});
+  const state=await runCase(caseId,deps(store,m));
+  assert.equal(state.status,'completed',JSON.stringify(state.inspection));
+  const wallet=state.steps.investigation.tasks.wallet;
+  assert.equal(wallet.attempts.length,1);
+  assert.match(wallet.attempts[0].error,/timed out/);
+  assert.deepEqual([wallet.attempts[0].check.outcome,wallet.attempts[0].check.task_id],['found',wallet.task_id]);
+  assert.deepEqual(m.calls.createAttempts,['invoice','wallet','supplier']);
+  assert.deepEqual(m.calls.lists[0].slice(0,6),['tasks','list','--coworker-id','cw-wallet','--limit','100']);
+  assert.equal(m.calls.payments.length,3);
+ });
+});
+
+test('Q1: create fails and the check proves no task exists → marked not_sent and created again',async()=>{
+ await withCase(async(store,caseId)=>{
+  const m=mocks({createPlan:{supplier:['fail_before']}});
+  const state=await runCase(caseId,deps(store,m));
+  assert.equal(state.status,'completed',JSON.stringify(state.inspection));
+  const supplier=state.steps.investigation.tasks.supplier;
+  assert.deepEqual(supplier.attempts.map(entry=>entry.check?.outcome??null),['none',null]);
+  assert.deepEqual(m.calls.createAttempts,['invoice','wallet','supplier','supplier']);
+  assert.equal(m.calls.creates.length,3);
+  assert.equal(m.calls.payments.length,3);
+ });
+});
+
+test('Q1: three attempts that each prove nothing was created → stop for inspection, no fourth create',async()=>{
+ await withCase(async(store,caseId)=>{
+  const m=mocks({createPlan:{invoice:['fail_before','fail_before','fail_before','ok']}});
+  const state=await runCase(caseId,deps(store,m));
+  assert.equal(state.status,'needs_inspection');
+  assert.equal(state.inspection.code,'sokosumi_create_attempts_exhausted');
+  assert.deepEqual(m.calls.createAttempts,['invoice','invoice','invoice']);
+  assert.equal(state.steps.investigation.tasks.invoice.attempts.length,3);
+  assert.equal(m.calls.payments.length,0);
+ });
+});
+
+test('Q1: an ambiguous check (two matches) or a failing list call stops for inspection without recreating',async()=>{
+ await withCase(async(store,caseId)=>{
+  const m=mocks({createPlan:{wallet:['fail_after']},list:(args,all)=>({tasks:[...all,...all].filter(task=>task.role==='wallet').map(task=>({...task,status:'READY'}))})});
+  const state=await runCase(caseId,deps(store,m));
   assert.equal(state.status,'needs_inspection');
   assert.equal(state.inspection.code,'sokosumi_create_unknown');
-  assert.equal(m.calls.creates.length,2);
+  assert.equal(state.steps.investigation.tasks.wallet.attempts[0].check.reason,'multiple_matches');
+  assert.deepEqual(m.calls.createAttempts,['invoice','wallet']);
   assert.equal(m.calls.payments.length,0);
+ });
+ await withCase(async(store,caseId)=>{
+  const m=mocks({createPlan:{wallet:['fail_before']},list:()=>{throw new Error('Sokosumi CLI returned non-JSON output');}});
+  const state=await runCase(caseId,deps(store,m));
+  assert.equal(state.status,'needs_inspection');
+  assert.equal(state.steps.investigation.tasks.wallet.attempts[0].check.outcome,'check_failed');
+  assert.deepEqual(m.calls.createAttempts,['invoice','wallet']);
+  // a stopped case is never resumed
+  await runCase(caseId,deps(store,m));
+  assert.deepEqual(m.calls.createAttempts,['invoice','wallet']);
+ });
+});
+
+const connectFailed=()=>Object.assign(new Error('Backend initial-check request failed (connection not established).'),{status:0,code:'connect_failed'});
+
+test('Q2: connect_failed → initial check resent with backoff, then the case continues',async()=>{
+ await withCase(async(store,caseId)=>{
+  const m=mocks({band:'low'});
+  const ok=m.backend.initialCheck;
+  m.backend.initialCheck=async xml=>{if(m.calls.initialCheck<2){m.calls.initialCheck+=1;throw connectFailed();}return ok(xml);};
+  const d=deps(store,m);
+  const state=await runCase(caseId,d);
+  assert.equal(state.status,'completed',JSON.stringify(state.inspection));
+  assert.equal(m.calls.initialCheck,3);
+  assert.deepEqual(d.clock.delays.slice(0,2),[2000,4000]);
+  assert.deepEqual(state.steps.initial_check.attempts.map(entry=>entry.outcome??null),['connect_failed','connect_failed',null]);
+  assert.equal(m.calls.payouts.length,1);
+ });
+});
+
+test('Q2: connect_failed on every attempt → 1 send + 3 resends, then the case fails (nothing was sent)',async()=>{
+ await withCase(async(store,caseId)=>{
+  const m=mocks();
+  m.backend.initialCheck=async()=>{m.calls.initialCheck+=1;throw connectFailed();};
+  const d=deps(store,m);
+  const state=await runCase(caseId,d);
+  assert.equal(state.status,'failed');
+  assert.equal(state.inspection.code,'initial_check_unreachable');
+  assert.equal(m.calls.initialCheck,4);
+  assert.deepEqual(d.clock.delays,[2000,4000,8000]);
+  assert.deepEqual(state.steps.initial_check.attempts.map(entry=>entry.outcome),['connect_failed','connect_failed','connect_failed','connect_failed']);
+ });
+});
+
+test('Q2: timeout, reset, 5xx or an unparsable result are never resent → inspection after one send',async()=>{
+ for(const failure of [{status:0,code:'network_error'},{status:503,code:'dependency_unavailable'},{status:502,code:'http_error'},{status:200,code:'invalid_response'},{}]){
+  await withCase(async(store,caseId)=>{
+   const m=mocks();
+   m.backend.initialCheck=async()=>{m.calls.initialCheck+=1;throw Object.assign(new Error('x'),failure);};
+   const state=await runCase(caseId,deps(store,m));
+   assert.equal(state.status,'needs_inspection',JSON.stringify(failure));
+   assert.equal(state.inspection.code,'initial_check_unknown');
+   assert.equal(m.calls.initialCheck,1);
+   const again=await runCase(caseId,deps(store,m));
+   assert.equal(again.status,'needs_inspection');
+   assert.equal(m.calls.initialCheck,1);
+  });
+ }
+});
+
+test('Q2: restart after a crash during the resend backoff continues from the journaled not_sent attempt',async()=>{
+ await withCase(async(store,caseId)=>{
+  const m=mocks({band:'high'});
+  const ok=m.backend.initialCheck;
+  m.backend.initialCheck=async()=>{m.calls.initialCheck+=1;throw connectFailed();};
+  const crashing=crashOnce(store,state=>state.steps.initial_check?.attempts?.length===2);
+  await assert.rejects(runCase(caseId,deps(crashing,m)),/simulated crash/);
+  assert.equal(store.read(caseId).steps.initial_check.phase,'not_sent');
+  m.backend.initialCheck=ok;
+  const state=await runCase(caseId,deps(store,m));
+  assert.equal(state.status,'completed',JSON.stringify(state.inspection));
+  assert.equal(m.calls.initialCheck,2);
  });
 });
 

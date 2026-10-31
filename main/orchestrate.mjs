@@ -5,7 +5,11 @@
 //   medium → 3 Sokosumi tasks → 3 x402 payments → poll reports → Main LLM → decide() → POST /v1/decisions → payout if approved
 // Crash safety: every external write (initial check, task create, payment, decision, payout) is journaled in case.json
 // BEFORE it is sent. A write whose journal entry exists without an outcome is never sent again: the case stops in
-// `needs_inspection`. Payments go through payOnce, whose own journal makes a resumed call return the earlier result.
+// `needs_inspection`. Two bounded exceptions, both journaled per attempt:
+//  - the initial check is resent only after `connect_failed` (no TCP connection, so nothing reached Rust);
+//  - a failed or interrupted Sokosumi create is resolved by a read-only `tasks list` check: one match is adopted,
+//    provably none allows a new create (max 3 attempts), anything else stops for inspection.
+// Payments go through payOnce, whose own journal makes a resumed call return the earlier result.
 import {mkdirSync} from 'node:fs';
 import {readPayJournal,payJournalPath} from '../x402/pay.mjs';
 import {INVESTIGATOR_ROLES,investigatorPayPath,investigatorTaskId} from '../investigator/contract.mjs';
@@ -15,7 +19,7 @@ import {TERMINAL_STATUSES} from './case-store.mjs';
 import {decide,decisionRequest} from './decide.mjs';
 import {buildRoleInputs} from './inputs.mjs';
 import {extractInvoiceFields} from './xml.mjs';
-import {createInvestigatorTask,readInvestigatorTask,taskOutcome} from './sokosumi-tasks.mjs';
+import {createInvestigatorTask,findCreatedTask,readInvestigatorTask,taskOutcome} from './sokosumi-tasks.mjs';
 
 export const DEFAULT_INVESTIGATION_TIMEOUT_MS=15*60_000;
 export const DEFAULT_POLL_MS=15_000;
@@ -29,8 +33,13 @@ export class CaseFailed extends Error{constructor(code,message){super(message);t
 
 const clip=(value,max=600)=>{const text=String(value??'');return text.length>max?`${text.slice(0,max-1)}…`:text;};
 const iso=ms=>new Date(ms).toISOString();
-// The Rust API stored nothing for these statuses (spec 5.1: 4xx validation/auth/conflict, 503 dependency_unavailable).
-const NOTHING_STORED=new Set([400,401,403,404,409,413,415,422,503]);
+// The Rust API stored nothing for these 4xx statuses (spec 5.1: validation, auth, conflict). Every 5xx, timeout,
+// reset or unparsable response stops the case for inspection (user decision 2026-10-31).
+const NOTHING_STORED=new Set([400,401,403,404,409,413,415,422]);
+export const DEFAULT_INITIAL_CHECK_MAX_ATTEMPTS=4; // 1 send + at most 3 resends, only after connect_failed
+export const DEFAULT_INITIAL_CHECK_BACKOFF_MS=2_000; // 2 s, 4 s, 8 s
+export const DEFAULT_TASK_CREATE_MAX_ATTEMPTS=3;
+export const DEFAULT_TASK_CHECK_DELAY_MS=10_000; // lets an in-flight create land before the read-only check
 
 async function loadInvestigationContext(ctx,result){
  const {deps}=ctx;
@@ -50,48 +59,108 @@ async function initialCheck(ctx){
  const {caseId,deps,save}=ctx;
  const step=ctx.state.steps.initial_check;
  if(step?.phase==='done')return step.result;
- if(step)throw new CaseStop('initial_check_unknown','The initial check request may have been stored by the backend. Inspect GET /v1/checks before any retry; it is never resent automatically.');
+ if(step&&step.phase!=='not_sent')throw new CaseStop('initial_check_unknown','The initial check request may have been stored by the backend. Inspect GET /v1/checks before any retry; it is never resent automatically.');
  const xml=deps.store.readXml(caseId);
  if(xml===null)throw new CaseStop('xml_missing','The submitted XML is missing from the case directory.');
- save(state=>{state.status='initial_check';state.steps.initial_check={phase:'started',at:iso(deps.clock.now())};});
+ const maxAttempts=deps.config.initialCheckMaxAttempts??DEFAULT_INITIAL_CHECK_MAX_ATTEMPTS;
+ const backoffMs=deps.config.initialCheckBackoffMs??DEFAULT_INITIAL_CHECK_BACKOFF_MS;
  let result;
- try{result=await deps.backend.initialCheck(xml);}
- catch(error){
-  if(NOTHING_STORED.has(error?.status)){
-   save(state=>{state.steps.initial_check={...state.steps.initial_check,phase:'refused',code:error.code??'http_error',http_status:error.status};});
+ for(;;){
+  const attempts=ctx.state.steps.initial_check?.attempts??[];
+  if(attempts.length>=maxAttempts){
    deps.store.removeXml(caseId);
-   throw new CaseFailed(`initial_check_refused:${error.code??error.status}`,`The backend refused the initial check (HTTP ${error.status} ${error.code}). Nothing was stored.`);
+   throw new CaseFailed('initial_check_unreachable',`The backend could not be reached in ${attempts.length} attempts (connection never established). Nothing was sent.`);
   }
-  save(state=>{state.steps.initial_check={...state.steps.initial_check,phase:'unknown',error:clip(error?.message)};});
-  throw new CaseStop('initial_check_unknown',`Initial check outcome unknown: ${clip(error?.message)}`);
+  if(attempts.length){
+   const delay=backoffMs*2**(attempts.length-1);
+   deps.log?.(`case=${caseId} event=initial_check_resend attempt=${attempts.length+1} delay_ms=${delay}`);
+   await deps.clock.sleep(delay);
+  }
+  save(state=>{state.status='initial_check';state.steps.initial_check={phase:'started',at:iso(deps.clock.now()),attempts:[...attempts,{n:attempts.length+1,at:iso(deps.clock.now())}]};});
+  try{result=await deps.backend.initialCheck(xml);break;}
+  catch(error){
+   if(error?.code==='connect_failed'){
+    // Proven not sent: the TCP connection was never established (backend.mjs connectionNotEstablished).
+    save(state=>{const entry=state.steps.initial_check;entry.phase='not_sent';entry.attempts.at(-1).outcome='connect_failed';});
+    continue;
+   }
+   if(NOTHING_STORED.has(error?.status)){
+    save(state=>{state.steps.initial_check={...state.steps.initial_check,phase:'refused',code:error.code??'http_error',http_status:error.status};});
+    deps.store.removeXml(caseId);
+    throw new CaseFailed(`initial_check_refused:${error.code??error.status}`,`The backend refused the initial check (HTTP ${error.status} ${error.code}). Nothing was stored.`);
+   }
+   save(state=>{state.steps.initial_check={...state.steps.initial_check,phase:'unknown',code:error?.code??null,http_status:error?.status??null,error:clip(error?.message)};});
+   throw new CaseStop('initial_check_unknown',`Initial check outcome unknown: ${clip(error?.message)}`);
+  }
  }
  save(state=>{
-  state.steps.initial_check={phase:'done',at:iso(deps.clock.now()),result};
+  state.steps.initial_check={phase:'done',at:iso(deps.clock.now()),attempts:state.steps.initial_check.attempts,result};
   state.check={check_id:result.check_id,band:result.summary.band,risk_score:result.summary.risk_score??null};
  });
  deps.store.removeXml(caseId);
  return result;
 }
 
+// After a failed or interrupted `tasks create`: a read-only check decides. Exactly one match → use it. Provably none →
+// the attempt is marked not_sent and may be retried. A failed or ambiguous check → stop for inspection.
+async function resolveCreateAttempt(ctx,role,inputs){
+ const {caseId,deps,save}=ctx;
+ const investigator=deps.config.investigators[role];
+ const delay=deps.config.taskCheckDelayMs??DEFAULT_TASK_CHECK_DELAY_MS;
+ if(delay>0)await deps.clock.sleep(delay);
+ const check=await findCreatedTask({run:deps.sokosumi,coworkerId:investigator.coworkerId,taskArgs:deps.config.taskArgs??[],name:taskName(caseId,role),
+  description:inputs?.[role]?.text,logicalTaskId:investigatorTaskId(caseId,role)});
+ const at=iso(deps.clock.now());
+ save(state=>{
+  const entry=state.steps.investigation.tasks[role];
+  entry.attempts.at(-1).check={...check,at};
+  if(check.outcome==='found')Object.assign(entry,{phase:'created',task_id:check.task_id,status:null,found_by_check:true});
+  else if(check.outcome==='none')entry.phase='not_sent';
+  else entry.phase='create_unknown';
+ });
+ deps.log?.(`case=${caseId} event=task_create_check role=${role} outcome=${check.outcome}${check.task_id?` task_id=${check.task_id}`:''}`);
+ if(check.outcome==='ambiguous'||check.outcome==='check_failed')
+  throw new CaseStop('sokosumi_create_unknown',`The ${role} task may exist; the read-only check was ${check.outcome} (${check.reason}). Inspect \`sokosumi tasks list --coworker-id ${investigator.coworkerId}\` before any retry.`);
+}
+
+const taskName=(caseId,role)=>`Sniffer ${caseId} ${role}`;
+
 async function createTasks(ctx,result){
  const {caseId,deps,save}=ctx;
  const inv=()=>ctx.state.steps.investigation;
+ const maxAttempts=deps.config.taskCreateMaxAttempts??DEFAULT_TASK_CREATE_MAX_ATTEMPTS;
  let inputs=null;
  for(const role of INVESTIGATOR_ROLES){
-  const existing=inv().tasks[role];
-  if(existing?.phase==='created')continue;
-  if(existing)throw new CaseStop('sokosumi_create_unknown',`A Sokosumi task for ${role} may already exist (journal phase ${existing.phase}). Inspect \`sokosumi tasks list\` before any retry.`);
-  inputs??=await loadInvestigationContext(ctx,result);
   const investigator=deps.config.investigators[role];
-  save(state=>{state.steps.investigation.tasks[role]={phase:'creating',coworker_id:investigator.coworkerId,at:iso(deps.clock.now())};});
-  let created;
-  try{created=await createInvestigatorTask({run:deps.sokosumi,coworkerId:investigator.coworkerId,taskArgs:deps.config.taskArgs??[],name:`Sniffer ${caseId} ${role}`,description:inputs[role].text});}
-  catch(error){
-   save(state=>{state.steps.investigation.tasks[role].phase='create_unknown';state.steps.investigation.tasks[role].error=clip(error?.message);});
-   throw new CaseStop('sokosumi_create_unknown',`Creating the ${role} task failed or returned no valid task ID; it may exist. ${clip(error?.message)}`);
+  for(;;){
+   const entry=inv().tasks[role];
+   if(entry?.phase==='created')break;
+   if(entry?.phase==='create_unknown')throw new CaseStop('sokosumi_create_unknown',`A Sokosumi task for ${role} may already exist (journal phase ${entry.phase}). Inspect \`sokosumi tasks list\` before any retry.`);
+   inputs??=await loadInvestigationContext(ctx,result);
+   if(entry?.phase==='creating'){
+    // Crash during an earlier create: never resend blindly, check first.
+    if(!Array.isArray(entry.attempts)||!entry.attempts.length)save(state=>{state.steps.investigation.tasks[role].attempts=[{n:1,at:entry.at??null}];});
+    await resolveCreateAttempt(ctx,role,inputs);
+    continue;
+   }
+   const attempts=entry?.attempts??[];
+   if(attempts.length>=maxAttempts)throw new CaseStop('sokosumi_create_attempts_exhausted',`Creating the ${role} task failed ${attempts.length} times; each time no task was found.`);
+   save(state=>{state.steps.investigation.tasks[role]={phase:'creating',coworker_id:investigator.coworkerId,at:iso(deps.clock.now()),
+    attempts:[...attempts,{n:attempts.length+1,at:iso(deps.clock.now())}]};});
+   let created;
+   try{created=await createInvestigatorTask({run:deps.sokosumi,coworkerId:investigator.coworkerId,taskArgs:deps.config.taskArgs??[],name:taskName(caseId,role),description:inputs[role].text});}
+   catch(error){
+    save(state=>{state.steps.investigation.tasks[role].attempts.at(-1).error=clip(error?.message);});
+    if(error?.code==='coworker_mismatch'){
+     save(state=>{state.steps.investigation.tasks[role].phase='create_unknown';});
+     throw new CaseStop('sokosumi_create_unknown',`Sokosumi created the ${role} task ${error.taskId} for another Coworker. Inspect it before any retry.`);
+    }
+    await resolveCreateAttempt(ctx,role,inputs);
+    continue;
+   }
+   save(state=>{Object.assign(state.steps.investigation.tasks[role],{phase:'created',task_id:created.taskId,status:created.status});});
+   deps.log?.(`case=${caseId} event=task_created role=${role} task_id=${created.taskId}`);
   }
-  save(state=>{Object.assign(state.steps.investigation.tasks[role],{phase:'created',task_id:created.taskId,status:created.status});});
-  deps.log?.(`case=${caseId} event=task_created role=${role} task_id=${created.taskId}`);
  }
 }
 
