@@ -40,9 +40,10 @@ public class MustangDaemon {
             int exitCode = 2;
             try {
                 ZUGFeRDValidator v = new ZUGFeRDValidator();
-                v.setNoNotices(true);
+                v.disableNotices();
                 String report = v.validate(path);
-                exitCode = v.getExitCode();
+                // Same as Mustang CLI `--action validate`: System.exit(-1) (255) unless completely valid.
+                exitCode = v.wasCompletelyValid() ? 0 : 255;
                 if (report != null) {
                     reportBytes = report.getBytes(StandardCharsets.UTF_8);
                 }

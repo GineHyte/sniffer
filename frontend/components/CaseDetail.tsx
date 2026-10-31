@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useQuery } from "@tanstack/react-query";
-import { getCase, type CaseWithCheck, type FiredCriterion, type InvestigatorView } from "@/lib/api";
+import { getCase, type CaseView, type CaseWithCheck, type FiredCriterion, type InvestigatorView } from "@/lib/api";
 import { BAND_LABEL, INSPECTION_HINT, isSettled, outcome, steps, type StepState, type Tone } from "@/lib/progress";
 import { Mascot, type Animation } from "./Mascot";
 import { Badge, TxLink, useGatewayConfig, type BadgeTone } from "./ui";
@@ -14,10 +14,17 @@ const VERDICT_TONE: Record<string, BadgeTone> = { CLEAR: "ok", CONCERN: "warn", 
 const AGENT_LABEL: Record<string, string> = { invoice: "Invoice", wallet: "Wallet", research: "Research" };
 const REACTION: Record<Tone, Animation> = {
   pending: "baby_03_glasses",
-  approved: "baby_02_sit",
+  approved: "baby_03b_glasses_bounce",
   rejected: "baby_04_sad",
   attention: "baby_04b_sad_stand",
 };
+
+/** The pay decision sets the mood, even if a later step (payout) needs attention. */
+function mood(view: CaseView): Animation {
+  if (view.decision?.decision === "PAY") return REACTION.approved;
+  if (view.decision?.decision === "DONT_PAY") return REACTION.rejected;
+  return REACTION[outcome(view).tone];
+}
 
 /** Polls one case every 2 s until it is settled (payout confirmed or a final stop). */
 export function useCase(caseId: string | null) {
@@ -142,7 +149,7 @@ export function CaseBody({ data, mock }: { data: CaseWithCheck; mock: boolean })
       <Stepper data={data} />
 
       <div className="flex flex-wrap items-start gap-6">
-        <Mascot play={REACTION[outcome(view).tone]} scale={3} />
+        <Mascot play={mood(view)} scale={3} />
         <Score score={check?.risk_score ?? view.risk_score} band={check?.band ?? view.band} />
         <dl className="grid flex-1 grid-cols-[auto_1fr] gap-x-4 gap-y-1.5 text-sm">
           <dt className="text-ink-3">Prüfgebühr</dt>
