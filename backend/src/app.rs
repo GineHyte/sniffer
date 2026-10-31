@@ -71,13 +71,15 @@ pub async fn startup(env: EnvConfig) -> anyhow::Result<AppState> {
             EnvMustangMode::Cli => MustangMode::Cli,
             EnvMustangMode::Off => MustangMode::Off,
             EnvMustangMode::MockValid => MustangMode::MockValid,
+            EnvMustangMode::Daemon => MustangMode::Daemon,
         },
         java_bin: PathBuf::from(&env.java_bin),
         jar: env.mustang_jar.clone(),
         whitelist: env.mustang_rule_whitelist.clone(),
         timeout_ms: env.mustang_timeout_ms,
         max_parallel: env.mustang_max_parallel,
-    });
+    })
+    .await;
 
     Ok(AppState {
         pool,

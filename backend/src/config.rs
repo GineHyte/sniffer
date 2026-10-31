@@ -54,6 +54,7 @@ pub enum MustangMode {
     Cli,
     Off,
     MockValid,
+    Daemon,
 }
 
 pub const DEFAULT_BIND_ADDR: &str = "0.0.0.0:8080";
@@ -193,6 +194,7 @@ impl EnvConfig {
                 ("cli", MustangMode::Cli),
                 ("off", MustangMode::Off),
                 ("mock_valid", MustangMode::MockValid),
+                ("daemon", MustangMode::Daemon),
             ],
         )?;
         let java_bin = get("JAVA_BIN").unwrap_or_else(|| "java".to_string());
@@ -281,10 +283,11 @@ impl EnvConfig {
     /// FR-80: with `MUSTANG_MODE=cli` the JAR must exist. Separate from
     /// [`EnvConfig::from_vars`] so parsing stays free of file-system access.
     pub fn check_mustang_jar(&self) -> Result<(), ConfigError> {
-        if self.mustang_mode == MustangMode::Cli && !self.mustang_jar.is_file() {
+        let needs_jar = matches!(self.mustang_mode, MustangMode::Cli | MustangMode::Daemon);
+        if needs_jar && !self.mustang_jar.is_file() {
             return Err(invalid(
                 "MUSTANG_JAR",
-                "file does not exist (required with MUSTANG_MODE=cli)".into(),
+                "file does not exist (required with MUSTANG_MODE=cli or daemon)".into(),
             ));
         }
         Ok(())

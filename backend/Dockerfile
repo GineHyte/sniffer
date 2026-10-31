@@ -15,6 +15,16 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     cargo build --release --locked --bin sniffer \
  && cp target/release/sniffer /usr/local/bin/sniffer
 
+# Compile MustangDaemon.java against the Mustang jar using the JDK image.
+# The runtime image uses JRE-only, so compilation must happen here.
+FROM eclipse-temurin:21.0.13_9-jdk-noble AS java-build
+ARG MUSTANG_URL=https://github.com/ZUGFeRD/mustangproject/releases/download/core-2.26.0/Mustang-CLI-2.26.0.jar
+ARG MUSTANG_SHA256=42d7868cb68264874a7b8cab4c3587b03b23ccc7cd72373da917f66758bb9736
+RUN curl -fsSL --retry 3 -o /tmp/Mustang-CLI-2.26.0.jar "$MUSTANG_URL" \
+ && echo "$MUSTANG_SHA256  /tmp/Mustang-CLI-2.26.0.jar" | sha256sum -c -
+COPY mustang-daemon/MustangDaemon.java /tmp/
+RUN javac -cp /tmp/Mustang-CLI-2.26.0.jar /tmp/MustangDaemon.java
+
 FROM eclipse-temurin:21.0.13_9-jre-noble
 
 # Mustang-CLI 2.26.0 (release core-2.26.0); the build fails on a SHA-256 mismatch.
@@ -24,6 +34,7 @@ RUN mkdir -p /opt/mustang \
  && curl -fsSL --retry 3 -o /opt/mustang/Mustang-CLI-2.26.0.jar "$MUSTANG_URL" \
  && echo "$MUSTANG_SHA256  /opt/mustang/Mustang-CLI-2.26.0.jar" | sha256sum -c - \
  && chmod 0444 /opt/mustang/Mustang-CLI-2.26.0.jar
+COPY --from=java-build /tmp/MustangDaemon.class /opt/mustang/
 
 RUN groupadd --system --gid 10001 sniffer \
  && useradd --system --uid 10001 --gid sniffer --home-dir /app --shell /usr/sbin/nologin sniffer
@@ -40,6 +51,7 @@ ENV SNIFFER_BIND_ADDR=0.0.0.0:8080 \
     CONFIG_DIR=/app/config \
     DATA_DIR=/app/data \
     MUSTANG_JAR=/opt/mustang/Mustang-CLI-2.26.0.jar \
+    MUSTANG_MODE=daemon \
     JAVA_BIN=java
 
 USER sniffer

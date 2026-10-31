@@ -3,6 +3,10 @@
 //! [`evaluate_report`] turns a Mustang stdout report plus exit code into a
 //! [`Validation`] (steps 4-11). [`Mustang::validate`] runs the CLI (steps 1-3)
 //! behind a semaphore of `MUSTANG_MAX_PARALLEL` permits.
+//!
+//! When `MUSTANG_MODE=daemon` the pool holds `MUSTANG_MAX_PARALLEL` long-running
+//! JVM processes (started once at startup); each request sends a temp-file path
+//! over stdin and reads the report over stdout, avoiding per-check JVM startup.
 
 use std::io::Write as _;
 use std::path::PathBuf;
@@ -12,8 +16,8 @@ use std::time::Duration;
 
 use regex::Regex;
 use serde::Serialize;
-use tokio::io::AsyncReadExt as _;
-use tokio::sync::Semaphore;
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::sync::{Mutex, Semaphore};
 
 /// Upper bound for the stdout report we read from Mustang.
 const MAX_STDOUT_BYTES: u64 = 32 * 1024 * 1024;
@@ -24,6 +28,8 @@ pub enum MustangMode {
     Cli,
     Off,
     MockValid,
+    /// Long-running JVM daemon pool; avoids per-check JVM startup cost.
+    Daemon,
 }
 
 impl std::str::FromStr for MustangMode {
@@ -34,8 +40,9 @@ impl std::str::FromStr for MustangMode {
             "cli" => Ok(Self::Cli),
             "off" => Ok(Self::Off),
             "mock_valid" => Ok(Self::MockValid),
+            "daemon" => Ok(Self::Daemon),
             other => Err(format!(
-                "MUSTANG_MODE must be cli, off or mock_valid, got {other:?}"
+                "MUSTANG_MODE must be cli, off, mock_valid or daemon, got {other:?}"
             )),
         }
     }
@@ -232,18 +239,143 @@ pub fn evaluate_report(stdout: &str, exit_code: i32, whitelist: &[String]) -> Va
     }
 }
 
+// ---------------------------------------------------------------------------
+// Daemon pool
+// ---------------------------------------------------------------------------
+
+/// One slot in the daemon pool: a long-running JVM process with open pipes.
+struct DaemonSlot {
+    stdin: tokio::process::ChildStdin,
+    stdout: BufReader<tokio::process::ChildStdout>,
+    _child: tokio::process::Child,
+}
+
+impl DaemonSlot {
+    /// Spawn one daemon process and wait for its "READY" signal.
+    async fn spawn(settings: &MustangSettings) -> Option<Self> {
+        let daemon_dir = settings.jar.parent()?;
+        let classpath = format!("{}:{}", settings.jar.display(), daemon_dir.display());
+
+        let mut child = tokio::process::Command::new(&settings.java_bin)
+            .arg("-Xmx1G")
+            .arg("-Dfile.encoding=UTF-8")
+            .arg("-cp")
+            .arg(&classpath)
+            .arg("MustangDaemon")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .map_err(|e| tracing::warn!(error = %e, "mustang daemon: spawn failed"))
+            .ok()?;
+
+        let stdin = child.stdin.take()?;
+        let mut stdout = BufReader::new(child.stdout.take()?);
+
+        // Wait up to 30 s for the JVM to initialise and print "READY".
+        let ready = tokio::time::timeout(Duration::from_secs(30), async {
+            let mut line = String::new();
+            stdout.read_line(&mut line).await.ok()?;
+            (line.trim() == "READY").then_some(())
+        })
+        .await;
+
+        match ready {
+            Ok(Some(())) => Some(Self { stdin, stdout, _child: child }),
+            _ => {
+                tracing::warn!("mustang daemon: process did not send READY in time");
+                None
+            }
+        }
+    }
+
+    /// Send `path` to the daemon, read and return `(report, exit_code)`.
+    /// Returns `None` on I/O error or protocol violation; the slot is then broken.
+    async fn validate(&mut self, path: &str, timeout_ms: u64) -> Option<(String, i32)> {
+        let request = format!("{path}\n");
+        self.stdin
+            .write_all(request.as_bytes())
+            .await
+            .map_err(|e| tracing::warn!(error = %e, "mustang daemon: stdin write failed"))
+            .ok()?;
+        self.stdin
+            .flush()
+            .await
+            .map_err(|e| tracing::warn!(error = %e, "mustang daemon: stdin flush failed"))
+            .ok()?;
+
+        tokio::time::timeout(Duration::from_millis(timeout_ms), async {
+            // Read "EXIT:<code>"
+            let mut line = String::new();
+            self.stdout.read_line(&mut line).await.ok()?;
+            let code: i32 = line.trim().strip_prefix("EXIT:")?.parse().ok()?;
+
+            // Read "LENGTH:<n>"
+            line.clear();
+            self.stdout.read_line(&mut line).await.ok()?;
+            let len: usize = line.trim().strip_prefix("LENGTH:")?.parse().ok()?;
+
+            if len == 0 {
+                return Some((String::new(), code));
+            }
+
+            // Read exactly `len` bytes of report + trailing newline.
+            let mut buf = vec![0u8; len + 1];
+            self.stdout.read_exact(&mut buf).await.ok()?;
+            buf.truncate(len);
+            Some((String::from_utf8_lossy(&buf).into_owned(), code))
+        })
+        .await
+        .map_err(|_| tracing::warn!(timeout_ms, "mustang daemon: validation timeout"))
+        .ok()
+        .flatten()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Public API
+// ---------------------------------------------------------------------------
+
 /// Mustang runner with a process semaphore (FR-82).
 pub struct Mustang {
     pub settings: MustangSettings,
-    pub semaphore: Semaphore,
+    /// Counts available slots (Cli: fixed at max_parallel; Daemon: 1 per live process).
+    semaphore: Semaphore,
+    /// Non-empty only in Daemon mode; invariant: len == semaphore available permits.
+    pool: Mutex<Vec<DaemonSlot>>,
 }
 
 impl Mustang {
-    pub fn new(settings: MustangSettings) -> Self {
-        let permits = settings.max_parallel.max(1);
+    /// Builds the runner. In Daemon mode this spawns `max_parallel` JVM processes
+    /// and waits for each to signal readiness; must be called from an async context.
+    pub async fn new(settings: MustangSettings) -> Self {
+        let n = settings.max_parallel.max(1);
+
+        if settings.mode == MustangMode::Daemon {
+            let mut slots = Vec::with_capacity(n);
+            for _ in 0..n {
+                if let Some(slot) = DaemonSlot::spawn(&settings).await {
+                    slots.push(slot);
+                } else {
+                    tracing::warn!("mustang: daemon slot failed to start");
+                }
+            }
+            let live = slots.len();
+            if live == 0 {
+                tracing::error!("mustang: all daemon slots failed — mode effectively unavailable");
+            }
+            return Self {
+                settings,
+                semaphore: Semaphore::new(live),
+                pool: Mutex::new(slots),
+            };
+        }
+
         Self {
             settings,
-            semaphore: Semaphore::new(permits),
+            semaphore: Semaphore::new(n),
+            pool: Mutex::new(Vec::new()),
         }
     }
 
@@ -263,6 +395,56 @@ impl Mustang {
                         evaluate_report(&stdout, code, &self.settings.whitelist)
                     }
                     None => Validation::unavailable_result(),
+                }
+            }
+            MustangMode::Daemon => {
+                let timeout = Duration::from_millis(self.settings.timeout_ms);
+                let permit =
+                    match tokio::time::timeout(timeout, self.semaphore.acquire()).await {
+                        Ok(Ok(p)) => p,
+                        _ => {
+                            tracing::warn!("mustang daemon: semaphore acquire timed out");
+                            return Validation::unavailable_result();
+                        }
+                    };
+
+                let xml_stripped = xml.strip_prefix('\u{feff}').unwrap_or(xml);
+                let path = match write_temp(xml_stripped) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        tracing::warn!(error = %e, "mustang daemon: temp file failed");
+                        return Validation::unavailable_result();
+                    }
+                };
+                let path_str = match path.to_str() {
+                    Some(s) => s.to_owned(),
+                    None => return Validation::unavailable_result(),
+                };
+
+                let mut slot = self.pool.lock().await.pop().expect("semaphore invariant");
+                let result = slot.validate(&path_str, self.settings.timeout_ms).await;
+                drop(path);
+
+                match result {
+                    Some((ref stdout, code)) => {
+                        let validation =
+                            evaluate_report(stdout, code, &self.settings.whitelist);
+                        self.pool.lock().await.push(slot);
+                        drop(permit);
+                        validation
+                    }
+                    None => {
+                        // Slot is broken; drop it and try to start a replacement.
+                        drop(slot);
+                        tracing::warn!("mustang daemon: slot died, spawning replacement");
+                        if let Some(new_slot) = DaemonSlot::spawn(&self.settings).await {
+                            self.pool.lock().await.push(new_slot);
+                            // Restore the permit so the pool count stays consistent.
+                            drop(permit);
+                        }
+                        // If spawn failed, permit is dropped without restoring → pool shrinks.
+                        Validation::unavailable_result()
+                    }
                 }
             }
         }
@@ -506,6 +688,7 @@ mod tests {
     #[tokio::test]
     async fn mode_off() {
         let v = Mustang::new(settings(MustangMode::Off))
+            .await
             .validate("<x/>")
             .await;
         assert_eq!(v.status, ValidationStatus::Off);
@@ -516,6 +699,7 @@ mod tests {
     #[tokio::test]
     async fn mode_mock_valid() {
         let v = Mustang::new(settings(MustangMode::MockValid))
+            .await
             .validate("<x/>")
             .await;
         assert_eq!(v.status, ValidationStatus::Valid);
@@ -528,7 +712,7 @@ mod tests {
     async fn cli_spawn_failure_unavailable() {
         let mut s = settings(MustangMode::Cli);
         s.java_bin = "sniffer-no-such-java-binary".into();
-        let v = Mustang::new(s).validate("<x/>").await;
+        let v = Mustang::new(s).await.validate("<x/>").await;
         assert_eq!(v.status, ValidationStatus::Unavailable);
     }
 
@@ -540,6 +724,7 @@ mod tests {
             "mock_valid".parse::<MustangMode>(),
             Ok(MustangMode::MockValid)
         );
+        assert_eq!("daemon".parse::<MustangMode>(), Ok(MustangMode::Daemon));
         assert!("CLI".parse::<MustangMode>().is_err());
     }
 
@@ -580,7 +765,7 @@ mod tests {
     #[ignore]
     async fn cli_f1_valid() {
         let Some(s) = cli_settings(&[]) else { return };
-        let v = Mustang::new(s).validate(F1).await;
+        let v = Mustang::new(s).await.validate(F1).await;
         assert_eq!(v.status, ValidationStatus::Valid, "{v:?}");
         assert_eq!(v.tool_version.as_deref(), Some("2.26.0"));
     }
@@ -591,6 +776,7 @@ mod tests {
     async fn cli_test22_missing_buyer_reference() {
         let Some(s) = cli_settings(&[]) else { return };
         let v = Mustang::new(s)
+            .await
             .validate(&f1_without_buyer_reference())
             .await;
         assert_eq!(v.status, ValidationStatus::Invalid, "{v:?}");
@@ -605,6 +791,7 @@ mod tests {
             return;
         };
         let v = Mustang::new(s)
+            .await
             .validate(&f1_without_buyer_reference())
             .await;
         assert_eq!(v.status, ValidationStatus::Valid, "{v:?}");
