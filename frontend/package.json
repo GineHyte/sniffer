@@ -6,9 +6,9 @@
     "node": ">=24"
   },
   "scripts": {
-    "dev": "next dev --port 3000",
+    "dev": "next dev --hostname 127.0.0.1 --port 3000",
     "build": "next build",
-    "start": "next start --port 3000",
+    "start": "next start --hostname 127.0.0.1 --port 3000",
     "gen:api": "openapi-typescript ../docs/openapi/customer-api.yaml -o lib/generated/customer-api.d.ts",
     "typecheck": "tsc --noEmit",
     "test": "node --test lib/*.test.ts"

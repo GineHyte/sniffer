@@ -187,6 +187,16 @@ answers `503 too_many_unconfirmed_intakes`, the queue pauses for 20 s and retrie
 polled every 2 s until its payout is confirmed or it stops. Submitted cases survive a reload, and every case has a
 link at `/cases/<case_id>`.
 
+**On a server:** the gateway and the UI listen on `127.0.0.1` only, so the paid intake is never exposed. Open the UI
+through an SSH tunnel and browse to `http://localhost:3000`:
+
+```sh
+ssh -L 3000:127.0.0.1:3000 <user>@<server>
+```
+
+Do not open it as `http://<server-ip>:3000`: anyone who reaches that address could spend the demo wallet, and browsers
+disable the crypto API the upload needs on plain-HTTP origins (the page then shows a blocking notice).
+
 Without Main, wallet or payments (UI work, video takes): `npm run customer:mock` instead of `npm run customer`.
 The mock moves scripted low, medium and high cases through all statuses, with fake hashes that are not on chain.
 Types in `frontend/lib/generated/` come from `docs/openapi/customer-api.yaml`: `cd frontend && npm run gen:api`.

@@ -22,8 +22,10 @@ const ERROR_TEXT: Record<string, string> = {
 };
 
 
+let keySeq = 0;
+
 async function toItem(file: File, maxXmlBytes: number): Promise<Item> {
-  const base = { key: crypto.randomUUID(), fileName: file.name, sizeBytes: file.size, preview: null, error: null, txHash: null, existing: false, attempts: 0 };
+  const base = { key: `${Date.now().toString(36)}-${++keySeq}`, fileName: file.name, sizeBytes: file.size, preview: null, error: null, txHash: null, existing: false, attempts: 0 };
   const checked = checkFile(file.name, new Uint8Array(await file.arrayBuffer()), maxXmlBytes);
   if (!checked.ok) return { ...base, xml: null, caseId: null, phase: "invalid", error: checked.error };
   return { ...base, xml: checked.xml, caseId: await caseIdFor(checked.xml), preview: previewOf(checked.xml), phase: "ready" };
@@ -36,6 +38,9 @@ export function UploadWorkbench() {
   const [dragging, setDragging] = useState(false);
   const input = useRef<HTMLInputElement>(null);
   const mode = config?.mode ?? "live";
+  // crypto.subtle (case ID) exists only on localhost or HTTPS. On a server, open the UI through an SSH tunnel.
+  const [secure, setSecure] = useState(true);
+  useEffect(() => setSecure(window.isSecureContext && Boolean(globalThis.crypto?.subtle)), []);
 
   // Submitted cases survive a reload or a visit to a case page; storage may be unavailable (private mode).
   useEffect(() => {
@@ -81,10 +86,10 @@ export function UploadWorkbench() {
   const addFiles = useCallback(
     async (files: FileList | File[]) => {
       const list = Array.from(files);
-      if (!list.length) return;
+      if (!list.length || !secure) return;
       dispatch({ type: "add", items: await Promise.all(list.map((file) => toItem(file, config?.max_xml_bytes ?? 500_000))) });
     },
-    [config?.max_xml_bytes],
+    [config?.max_xml_bytes, secure],
   );
 
   const ready = countBy(queue, "ready");
@@ -101,6 +106,13 @@ export function UploadWorkbench() {
           Erstprüfung, bei mittlerem Risiko drei Agenten, danach Freigabe und Auszahlung oder eine begründete Ablehnung.
         </p>
       </div>
+
+      {!secure && (
+        <div className="rounded-lg bg-bad-bg px-4 py-3 text-sm text-bad">
+          Upload gesperrt: Diese Seite ist über eine unverschlüsselte Adresse geöffnet. Bitte über <span className="font-mono">http://localhost:3000</span>{" "}
+          öffnen, auf einem Server per SSH-Tunnel: <span className="font-mono">ssh -L 3000:127.0.0.1:3000 &lt;server&gt;</span>
+        </div>
+      )}
 
       <div
         role="button"
