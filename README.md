@@ -41,9 +41,11 @@ Measured on Preprod: a low-risk case reports "approved, payout submitted" about 
 | `x402/` | x402 gate, idempotent payer, in-process facilitator, wallet CLI | |
 | `payout/` | Supplier payout transfer (Evolution SDK) | |
 | `scripts/` | `preflight` (read-only health check) and `demo` (test customer) | |
+| `customer/` | Customer gateway for the upload frontend: pays the intake from the demo wallet, joins case view and fired criteria | `127.0.0.1:21952` |
+| `frontend/` | Next.js upload UI (multi-file queue, live case progress, criteria with evidence) | `localhost:3000` |
 | `docs/` | Spec (`initial-check-spec.md`, German), plan and progress journal, x402 notes, OpenAPI specs, fixtures | |
 
-API reference: `docs/openapi/` has OpenAPI 3.1 specs for the Main API, the backend and the investigator API.
+API reference: `docs/openapi/` has OpenAPI 3.1 specs for the Main API, the backend, the investigator API and the customer gateway.
 
 ## Requirements
 
@@ -169,6 +171,26 @@ The demo prints each status change with the elapsed time, then the decision, exp
 
 Example of a medium-risk run: `npm run demo -- --confirm-live-payment --new-supplier --fresh-wallet`.
 
+### 7. Upload frontend
+
+The browser talks only to the Next.js app; `/api/*` is forwarded to the customer gateway (`customer/api.mjs`), which pays
+Main's intake with `payOnce` from the wallet `CUSTOMER_WALLET` (default `payer`). It shares the demo's payment journal
+(`.local/demo`), so an XML paid by `npm run demo` or by the UI is never paid twice. Two terminals, with Main running:
+
+```sh
+npm run customer -- --confirm-live-payments          # pays INTAKE_PRICE_LOVELACE per new invoice, hence the flag
+cd frontend && npm ci && npm run dev                 # http://localhost:3000
+```
+
+Drop one or more `.xml` files, check the preview, then click "prüfen". The queue pays one invoice at a time. When Main
+answers `503 too_many_unconfirmed_intakes`, the queue pauses for 20 s and retries the same invoice. Each case is
+polled every 2 s until its payout is confirmed or it stops. Submitted cases survive a reload, and every case has a
+link at `/cases/<case_id>`.
+
+Without Main, wallet or payments (UI work, video takes): `npm run customer:mock` instead of `npm run customer`.
+The mock moves scripted low, medium and high cases through all statuses, with fake hashes that are not on chain.
+Types in `frontend/lib/generated/` come from `docs/openapi/customer-api.yaml`: `cd frontend && npm run gen:api`.
+
 **Latency model.** Main answers `202` once the intake payment is verified and submitted. The initial check starts right away, and a case counts as `completed` once its payout is submitted. Both confirmations finish in the background, but investigator payments and the payout wait until the intake is confirmed.
 - An intake that fails on chain ends the case as `failed` (`intake_not_confirmed`).
 - An intake not confirmed within `INTAKE_CONFIRM_TIMEOUT_MS` (default 10 min) stops the case as `needs_inspection` (`intake_unconfirmed`).
@@ -178,6 +200,7 @@ Example of a medium-risk run: `npm run demo -- --confirm-live-payment --new-supp
 
 ```sh
 npm test                                             # Node tests (no network)
+cd frontend && npm test && npm run typecheck        # frontend logic tests and types
 cd backend && cargo test --lib                       # Rust unit tests
 npx --yes @redocly/cli@2.64.1 lint --skip-rule info-license docs/openapi/*.yaml
 ```

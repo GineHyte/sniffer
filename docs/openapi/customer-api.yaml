@@ -1,0 +1,255 @@
+openapi: 3.1.0
+info:
+  title: Sniffer Customer Gateway
+  version: 1.0.0
+  summary: Same-origin API of the upload frontend; pays the Main intake from the server demo wallet.
+  description: |
+    Customer gateway (source: `customer/api.mjs`, mock in `customer/mock.mjs`). The upload frontend (`frontend/`) reaches it
+    through the Next.js rewrite `/api/*`; the browser never sees a wallet, the backend token or the Main API.
+
+    **Payment.** `POST /api/invoices` pays the Main intake (`POST /v1/invoices`, x402, see `main-api.yaml`) with `payOnce`
+    from the wallet `CUSTOMER_WALLET` (default `payer`). It shares `npm run demo`'s journal (`DEMO_STATE_DIR`, default
+    `.local/demo`) and key `intake-<case_id>`, so one XML is paid at most once, whoever submits it. An XML whose case
+    already exists at Main answers `200` without paying.
+
+    Started live with `npm run customer -- --confirm-live-payments` (every new XML costs `INTAKE_PRICE_LOVELACE`), or
+    without any payment with `npm run customer:mock`.
+
+    Error bodies are `{"error": "<code>"}`, with an optional `message` for operator-facing detail.
+  contact:
+    name: Sniffer team
+servers:
+  - url: http://127.0.0.1:21952
+    description: Local default (CUSTOMER_HOST/CUSTOMER_PORT)
+tags:
+  - name: config
+  - name: intake
+  - name: cases
+security: []
+paths:
+  /api/config:
+    get:
+      tags: [config]
+      operationId: getConfig
+      summary: Price, network, paying wallet and Main reachability
+      responses:
+        '200':
+          description: Gateway configuration.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GatewayConfig'
+              example:
+                mode: live
+                network: cardano:preprod
+                price_lovelace: '2000000'
+                wallet: payer
+                max_xml_bytes: 500000
+                main_ok: true
+  /api/invoices:
+    post:
+      tags: [intake]
+      operationId: submitInvoice
+      summary: Pay and submit one e-invoice XML
+      description: |
+        Order: JSON body `{xml}` (`415` other types, `400` invalid, `413` too large) → root element must be a CII
+        `CrossIndustryInvoice` or UBL `Invoice` (`422 not_an_einvoice`) → existing case at Main (`200`, no payment) →
+        balance check (`409 payer_balance_too_low`) → `payOnce` to Main's intake.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [xml]
+              additionalProperties: false
+              properties:
+                xml:
+                  type: string
+                  description: The invoice XML document (at most `max_xml_bytes` UTF-8 bytes).
+      responses:
+        '200':
+          description: The case already exists at Main; nothing was paid.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SubmitResult'
+        '202':
+          description: Paid (submitted to the chain); Main runs the case. Poll `GET /api/cases/{case_id}`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SubmitResult'
+              example:
+                case_id: case-7c525f29803f643a7b98f6eebe6cc4ab
+                existing: false
+                payment_tx_hash: 4fcbf4357e8a6d6eb55e4d03f573e028d40957fd3d15b604d517afc37814e967
+        '400':
+          $ref: '#/components/responses/Error'
+        '409':
+          description: '`payer_balance_too_low`: the demo wallet cannot pay price plus fee margin. Nothing was signed.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '413':
+          $ref: '#/components/responses/Error'
+        '415':
+          $ref: '#/components/responses/Error'
+        '422':
+          description: |
+            `not_an_einvoice`, or Main refused the XML before any payment (its error code, e.g. `invalid_request`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '502':
+          description: '`payment_failed`: payOnce stopped (see `message`); the journal under `.local/demo` must be inspected.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: '`too_many_unconfirmed_intakes` from Main. Nothing was signed; retry later.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /api/cases/{case_id}:
+    parameters:
+      - name: case_id
+        in: path
+        required: true
+        schema:
+          type: string
+          pattern: '^case-[0-9a-f]{32}$'
+    get:
+      tags: [cases]
+      operationId: getCase
+      summary: Case view plus the fired criteria of the initial check
+      responses:
+        '200':
+          description: |
+            `case` is Main's public case view unchanged. `check` is the customer-facing projection of the backend
+            CheckResult once `case.check_id` is set (cached per check), `null` before; `check_error` names a failed
+            backend read.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CaseWithCheck'
+        '404':
+          $ref: '#/components/responses/Error'
+        '502':
+          description: '`main_unavailable`: Main did not answer.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+components:
+  responses:
+    Error:
+      description: Error with a code.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+        message:
+          type: string
+    GatewayConfig:
+      type: object
+      required: [mode, network, price_lovelace, wallet, max_xml_bytes, main_ok]
+      properties:
+        mode:
+          type: string
+          enum: [live, mock]
+        network:
+          type: string
+          const: cardano:preprod
+        price_lovelace:
+          type: string
+          pattern: '^[1-9][0-9]*$'
+        wallet:
+          type: string
+        max_xml_bytes:
+          type: integer
+        main_ok:
+          type: boolean
+    SubmitResult:
+      type: object
+      required: [case_id, existing, payment_tx_hash]
+      properties:
+        case_id:
+          type: string
+          pattern: '^case-[0-9a-f]{32}$'
+        existing:
+          type: boolean
+        payment_tx_hash:
+          type: [string, 'null']
+          pattern: '^[0-9a-f]{64}$'
+    CaseWithCheck:
+      type: object
+      required: [case, check, check_error]
+      properties:
+        case:
+          $ref: './main-api.yaml#/components/schemas/CaseView'
+        check:
+          oneOf:
+            - type: 'null'
+            - $ref: '#/components/schemas/CheckProjection'
+        check_error:
+          type: [string, 'null']
+    CheckProjection:
+      type: object
+      required: [check_id, checked_at, band, decision, risk_score, ko_triggered, checks_incomplete, criteria, reducers]
+      properties:
+        check_id:
+          type: string
+        checked_at:
+          type: string
+          format: date-time
+        band:
+          type: string
+          enum: [low, medium, high]
+        decision:
+          type: string
+          enum: [approve, review, decline]
+        risk_score:
+          type: integer
+          minimum: 0
+          maximum: 100
+        ko_triggered:
+          type: boolean
+        checks_incomplete:
+          type: array
+          items:
+            type: string
+        criteria:
+          type: array
+          items:
+            $ref: '#/components/schemas/FiredCriterion'
+        reducers:
+          type: array
+          items:
+            $ref: '#/components/schemas/FiredCriterion'
+    FiredCriterion:
+      type: object
+      required: [id, name, points, evidence]
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        points:
+          type: integer
+        evidence:
+          type: string
+        agent:
+          type: string
+          enum: [invoice, wallet, research]

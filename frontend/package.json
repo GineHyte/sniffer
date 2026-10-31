@@ -1,0 +1,31 @@
+{
+  "name": "sniffer-frontend",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "dev": "next dev --port 3000",
+    "build": "next build",
+    "start": "next start --port 3000",
+    "gen:api": "openapi-typescript ../docs/openapi/customer-api.yaml -o lib/generated/customer-api.d.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "node --test lib/*.test.ts"
+  },
+  "dependencies": {
+    "@tanstack/react-query": "5.104.3",
+    "next": "16.4.2",
+    "react": "19.2.9",
+    "react-dom": "19.2.9"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "4.3.3",
+    "@types/node": "24.19.2",
+    "@types/react": "19.2.18",
+    "@types/react-dom": "19.2.7",
+    "openapi-typescript": "7.13.0",
+    "tailwindcss": "4.3.3",
+    "typescript": "5.9.3"
+  }
+}
