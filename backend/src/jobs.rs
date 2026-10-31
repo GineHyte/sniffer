@@ -28,6 +28,7 @@ pub fn spawn_all(pool: PgPool, redis: MultiplexedConnection, env: Arc<EnvConfig>
     } else {
         tracing::info!("OFAC auto update disabled (OFAC_AUTO_UPDATE=false)");
     }
+    tokio::spawn(crate::payouts::unknown_job(pool.clone()));
     tokio::spawn(retention_job(pool, redis, env));
 }
 

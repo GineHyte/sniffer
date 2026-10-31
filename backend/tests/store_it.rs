@@ -81,7 +81,11 @@ async fn postgres_store() {
             .fetch_one(&pool)
             .await
             .unwrap();
-    assert_eq!(applied, 1, "exactly 0001 applied, no duplicate");
+    let expected = sqlx::migrate!("./migrations").migrations.len() as i64;
+    assert_eq!(
+        applied, expected,
+        "every migration applied once, no duplicate"
+    );
 
     // approve x6 in one transaction -> approved 6, trust 0.545 (spec 7.5).
     let supplier = fresh_hash("supplier");
