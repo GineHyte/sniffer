@@ -1,8 +1,27 @@
 # Sniffer MVP: Progress Journal
 
 Read this first when resuming. The full plan is in `docs/plans/2026-10-30-sniffer-mvp.md` (decision log §0 and agent-assignment table).
-Last update: 2026-10-31. Branch: `feat/mvp`, fast-forwarded into `main` and pushed to `origin/main` (public repo `GineHyte/sniffer`).
-Overall: **about 85%.** All code tasks through T27 are done: Rust backend (Initial Check, payouts, supplier history), x402 gate and payer (live payment measured), payout transfer, investigator API and worker, Main orchestrator. Left: T28 live provisioning, T29 E2E demo, T30 verification, safety review and README rewrite.
+Last update: 2026-10-31 (evening, macOS). Work happens directly on `main`, pushed to `origin/main` (public repo `GineHyte/sniffer`; git push works via `gh auth setup-git`, account `Skifry`).
+Overall: **about 95%.** Code, live provisioning (T28) and paid E2E runs on Preprod (T29) are done; the low-risk and medium-risk paths both ran end to end. Left: a medium-risk *approval* run with the open-order change, optional parallel investigator payments, T30 (safety review, final README).
+
+## RESUME HERE (state at 2026-10-31 ~05:10 UTC)
+**Next step for the user:** `sokosumi --preprod auth login` (OAuth session lasts ~2 h), then
+`npm run preflight -- --new-supplier --fresh-wallet` and `npm run demo -- --confirm-live-payment --new-supplier --fresh-wallet`.
+This is the first live run with the matched open order passed to investigators (39e2c65). Expected (computed, not measured): score 20, medium, supplier DE333333333 / PO-2026-003. After it only DE555555555 is left as a fresh mock supplier; add new VATs to `backend/data/vies-mock.json` + `open-orders.json` (then `npm run stack`) for more runs.
+**Remind the user** about the deferred optimisation: pay the 3 investigators in parallel by splitting `main-payer` into ≥3 UTxOs (~1.5 min saving per medium case; measured ~2 min sequential in `case-eb1afa98…`).
+
+**How to run everything** (all bind 127.0.0.1; logs went to the Claude scratchpad, which is session-specific):
+- `npm run stack` — Postgres, Redis (host 6380), Rust backend :8080 (rebuilds the image; needed after backend code or `backend/data/*` changes).
+- `npm run investigator:eve -- <invoice|wallet|supplier|main>` — Claude-backed Eve runtimes :21971–21974. Restart after any `promts/` change (they copy prompts into `.local/eve-<role>/` on start).
+- `npm run investigator:api -- <invoice|wallet|supplier>` — x402 APIs :21961–21963.
+- `npm run investigator:worker -- <invoice|wallet|supplier>` — Sokosumi workers (Celeris), keys in the macOS Keychain.
+- `npm run main -- --confirm-live-payments` — Main :21951 (restart after `main/`, `x402/`, `payout/` changes).
+- `npm run preflight` (read-only check of all of the above) and `npm run demo -- --confirm-live-payment [--invoice-number N] [--new-supplier] [--fresh-wallet] [--case ID]`.
+Processes were started with `nohup` in the background; stop with `pkill -f "main/api.mjs"` etc. Tests: `npm test` 245/245; `cargo test --lib` 302 (+3 ignored); OpenAPI lint clean.
+
+**Wallet balances (approx.):** payer ~94 tADA (test customer), main-payer ~100 tADA, payout ~100 tADA (funded from the faucet 2026-10-31).
+
+**Sandbox notes for Claude:** the auto-mode classifier blocks reading `.local/*.env`, minting Sokosumi keys and creating Sokosumi tasks — give the user the command with `!` instead. Appending to `.local/live.env` (no read) works.
 
 ## Working rules (from the user)
 - Split work into small tasks. Give each task to one project agent (see `.claude/agents/AGENTS.md`). Only one agent edits a given file at a time.
@@ -40,7 +59,7 @@ Overall: **about 85%.** All code tasks through T27 are done: Rust backend (Initi
 | T27 (0624459) | `payout/transfer.mjs` (Evolution SDK). Never resubmits. `.local/payout.env` format: `PAYOUT_MNEMONIC="<24 words>"` + optional `PAYOUT_ACCOUNT_INDEX` (T28 creates it). The local journal claim does not stop two machines from paying one intent. |
 | Tests now | `cargo test`: lib 298, acceptance 32 (+2 ignored), cli_it 1, decisions_it 7, history_it 2, payouts_it 18, store_it 2. Clippy and fmt clean. `npm test` 100/100. |
 
-## T28 live provisioning (IN PROGRESS 2026-10-31)
+## T28 live provisioning (DONE 2026-10-31, Celeris; TUM access pending)
 User choices: **organization** Workspace; generated local secrets; Postgres keeps `throwaway-test` (local only).
 Done (local only, no network writes):
 - `.local/sniffer-secrets.env`: random `SNIFFER_API_TOKEN`, `SNIFFER_HMAC_KEY` (32-byte hex), `POSTGRES_PASSWORD=throwaway-test`. Never print.
@@ -59,7 +78,9 @@ Done 2026-10-31 (moved to macOS; state copied into `.local/`):
   - `case-858cf9a0…` low (S-9 gone, score 15): approved by the initial check, payout confirmed (`4d9da357…`), ~57 s.
   - `case-df1fe6fe…` low after the latency change: 202 at +3.9 s, payout submitted at +11.9 s, confirmed at +52 s.
   - `case-eb1afa98…` medium (`--new-supplier`, score 55 incl. S-1): all 3 investigators paid sequentially, reports INSUFFICIENT_DATA/CONCERN/CONCERN → DONT_PAY/rejected (formal) at +3m17s.
-Still open: pass the matched open order to investigators so a first invoice can be approved (in progress); parallel investigator payments by splitting `main-payer` UTxOs (~1.5 min saving; user wants reminders); TUM-Hackathon Coworker access still PENDING.
+- **Open order to investigators (39e2c65):** Initial Check result has `invoice.open_order` (same match as I-8/T-3; `schema_version` kept at "1.0" — decide whether to bump to 1.1); Main passes it to the invoice and supplier investigators; their prompts treat a matching order as verifying amount and business relationship. Guardrails unchanged. Demo orders PO-2026-003 (DE333333333), PO-2026-005 (DE555555555). Demo `--fresh-wallet` creates `.local/x402/demo-recipient-<ms>.json` as the recipient (avoids S-1). Backend rebuilt, Eves and Main restarted with it; not yet run live.
+- **OpenAPI 3.1 specs:** `docs/openapi/{main-api,backend,investigator-api}.yaml` + README (lint: `npx --yes @redocly/cli@2.64.1 lint --skip-rule info-license docs/openapi/*.yaml`). The spec agent noted minor inconsistencies (backend 405 bodies empty vs FR-09, Main `/health` checks nothing, backend binds 0.0.0.0 inside the container) — not fixed.
+Still open: medium-risk approval run (see RESUME HERE); parallel investigator payments (remind the user); TUM-Hackathon Coworker access still PENDING (re-run `coworkers connect`, never `register`, after admin approval; then remove the two Celeris override lines at the end of `.local/live.env`); stale `COWORKER_ID`/`SOKOSUMI_ORGANIZATION_*` lines in `.env` (user should delete); parked `case-7c525f29…`.
 
 ## Wave 7 (DONE 2026-10-31; pushed to origin/main). Next: T28 live provisioning, T29 E2E demo, T30 verify/review/README.
 Wave 6 (T19, T20, T22, T27) is done and committed.
