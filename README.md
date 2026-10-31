@@ -28,9 +28,10 @@ Use Node.js 24 or newer for the agent and CLI.
    chmod 600 .env
    ```
 
-3. In `.env`, set `ZAI_API_KEY`, `ZAI_BASE_URL`, and `ZAI_MODEL` for your OpenAI-compatible model provider.
-   For a custom model absent from AI Gateway's catalog, also set `ZAI_CONTEXT_WINDOW_TOKENS` to its documented context window.
-   Use a positive whole number of tokens. Leave it blank to use Eve's catalog lookup.
+3. In `.env`, set `ANTHROPIC_API_KEY` for the Claude API. Eve calls Claude through the native `@ai-sdk/anthropic` provider.
+   `ANTHROPIC_MODEL` defaults to `claude-opus-5-5`.
+   `MODEL_CONTEXT_WINDOW_TOKENS` defaults to `1000000`, the context window of `claude-opus-5-5`, so Eve skips its catalog lookup.
+   If you pick another model, set it to that model's documented context window as a positive whole number of tokens.
 4. Keep `EVE_PORT` and `EVE_URL` consistent. Start the agent:
 
    ```sh

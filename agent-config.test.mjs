@@ -22,16 +22,25 @@ async function withEnv(values,load) {
  }
 }
 const fresh=path=>import(`${path}?test=${crypto.randomUUID()}`);
-const configFor=(contextWindowTokens,...roleArg)=>withEnv({ZAI_CONTEXT_WINDOW_TOKENS:contextWindowTokens,AGENT_ROLE:roleArg.length?roleArg[0]:'invoice'},async()=>(await fresh('./agent/agent.ts')).default);
+const agentFor=env=>withEnv({ANTHROPIC_API_KEY:'test-key',ANTHROPIC_MODEL:undefined,MODEL_CONTEXT_WINDOW_TOKENS:undefined,AGENT_ROLE:'invoice',...env},async()=>(await fresh('./agent/agent.ts')).default);
+const configFor=(contextWindowTokens,...roleArg)=>agentFor({MODEL_CONTEXT_WINDOW_TOKENS:contextWindowTokens,AGENT_ROLE:roleArg.length?roleArg[0]:'invoice'});
 const instructionsFor=role=>withEnv({AGENT_ROLE:role},async()=>(await fresh('./agent/instructions/role.ts')).default);
 
 test('custom model context window reaches Eve and rejects invalid token limits',async()=>{
  assert.equal((await configFor('32768')).modelContextWindowTokens,32768);
  for(const value of ['0','-1','1.5','invalid','9007199254740992']) {
-  await assert.rejects(configFor(value),/ZAI_CONTEXT_WINDOW_TOKENS must be a positive integer/);
+  await assert.rejects(configFor(value),/MODEL_CONTEXT_WINDOW_TOKENS must be a positive integer/);
  }
- assert.equal((await configFor('')).modelContextWindowTokens,undefined);
- assert.equal((await configFor(undefined)).modelContextWindowTokens,undefined);
+ assert.equal((await configFor('')).modelContextWindowTokens,1_000_000);
+ assert.equal((await configFor(undefined)).modelContextWindowTokens,1_000_000);
+});
+
+test('agent uses the native Anthropic provider and requires an API key',async()=>{
+ const {model}=await configFor(undefined);
+ assert.equal(model.provider,'anthropic.messages');
+ assert.equal(model.modelId,'claude-opus-5-5');
+ assert.equal((await agentFor({ANTHROPIC_MODEL:' claude-fable-5-1 '})).model.modelId,'claude-fable-5-1');
+ for(const key of [undefined,'','  ']) await assert.rejects(agentFor({ANTHROPIC_API_KEY:key}),/ANTHROPIC_API_KEY is required/);
 });
 
 test('each role maps to its prompt file',async()=>{
