@@ -7,26 +7,41 @@ It was built for the TUM Blockchain & AI Hackathon on [Masumi](https://www.masum
 
 ## How it works
 
+Two stages: a cheap software check runs on every invoice, and the expensive AI agent check runs only when the software check says **medium**.
+
 ```
-customer ──x402 1 tADA──▶ Main API ──▶ Rust backend: Initial Check (rules, score 0–100)
-                                │
-            ┌───────────────────┼──────────────────────────────┐
-         low (<20)        medium (20–59)                   high (≥60)
-            │                   │                               │
-            │     3 Sokosumi tasks, each investigator           │
-            │     paid via x402: invoice · wallet · supplier    │
-            │     (Claude via Eve) → reports                    │
-            │                   │                               │
-            │        Main LLM decides (code guardrails win)     │
-            ▼                   ▼                               ▼
-     approve + payout    approve + payout / reject           reject
+ 1. INTAKE         customer pays 1 tADA (x402) and sends the invoice XML to Main
+                                        │
+                                        ▼
+ 2. SOFTWARE CHECK Rust backend, deterministic rules, every invoice, seconds
+                   XML validation, VIES, Blockfrost, Chainabuse, OFAC,
+                   open orders, supplier history → risk score 0–100 → band
+                                        │
+           ┌────────────────────────────┼────────────────────────────┐
+           ▼                            ▼                            ▼
+       LOW (<20)                  MEDIUM (20–59)                 HIGH (≥60)
+       approve + payout                 │                        reject
+       no AI agents                     │                        no AI agents
+                                        ▼
+ 3. AI AGENT CHECK only for MEDIUM; input = the software check result
+                   3 investigators: invoice · wallet · supplier
+                   each one a Sokosumi task paid via x402 (Claude via Eve)
+                                        │
+                                        ▼
+ 4. DECISION       Main LLM weighs the 3 reports; code guardrails win
+                                        │
+                          ┌─────────────┴─────────────┐
+                          ▼                           ▼
+                   approve + payout                reject
 ```
 
-- **Initial Check** (`backend/`, Rust): parses and validates the XML (Mustang), normalises it, and runs the criteria in `backend/config/criteria.json` against VIES, Blockfrost, Chainabuse, the OFAC sanctions list, open orders and supplier history. The result is a score and a band.
-- **Investigators** (`investigator/`): one per role. Main creates a Sokosumi task for each one and pays its x402 gate. The role's worker only starts a task that has a confirmed payment, asks its Claude runtime for a structured report, and completes the task.
-- **Decision** (`main/`): an LLM weighs the reports per `promts/main_agent_prompt.txt`. Code guardrails override it: a missing or `INSUFFICIENT_DATA` report means rejected/formal, and a `CRITICAL` report or `DONT_PAY` means rejected/risk.
-- **Payout** (`payout/`): a policy-gated ADA transfer to the invoice's payment address at a fixed `ADA_PER_EUR` rate, recorded in the backend's payout ledger.
-- **Safety rule**: no tADA leaves Sniffer's wallets for a case until the customer's intake payment is confirmed on chain. Payment journals are written before signing, and an uncertain payment stops the case for human inspection instead of retrying.
+1. **Intake** (`main/`): Main verifies the customer's x402 payment and starts the case.
+2. **Software check** (Initial Check, `backend/`, Rust): parses and validates the XML (Mustang), normalises it, and runs the criteria in `backend/config/criteria.json` against VIES, Blockfrost, Chainabuse, the OFAC sanctions list, open orders and supplier history. The result is a score and a band. Low and high cases are decided here, without any AI cost.
+3. **AI agent check** (`investigator/`, medium cases only): one investigator per role, each given the software check result (including a matched open order). Main creates a Sokosumi task for each one and pays its x402 gate. The role's worker only starts a task that has a confirmed payment, asks its Claude runtime for a structured report, and completes the task.
+4. **Decision** (`main/`): an LLM weighs the reports per `promts/main_agent_prompt.txt`. Code guardrails override it: a missing or `INSUFFICIENT_DATA` report means rejected/formal, and a `CRITICAL` report or `DONT_PAY` means rejected/risk.
+5. **Payout** (`payout/`): a policy-gated ADA transfer to the invoice's payment address at a fixed `ADA_PER_EUR` rate, recorded in the backend's payout ledger.
+
+**Safety rule**: no tADA leaves Sniffer's wallets for a case until the customer's intake payment is confirmed on chain. Payment journals are written before signing. A payment that failed before signing is retried up to 3 times; an uncertain payment stops the case for human inspection instead of retrying.
 
 Measured on Preprod: a low-risk case reports "approved, payout submitted" about 12 s after the intake payment. A medium-risk case reaches its decision in about 3 min (three paid investigators). Details are in `docs/plans/PROGRESS.md`.
 
