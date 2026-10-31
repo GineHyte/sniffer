@@ -15,7 +15,7 @@ const BADGE: Record<BadgeTone, string> = {
 };
 
 export function Badge({ tone = "neutral", children, className = "" }: { tone?: BadgeTone; children: React.ReactNode; className?: string }) {
-  return <span className={`inline-flex items-center gap-1 whitespace-nowrap rounded-full px-2 py-0.5 text-xs font-medium ${BADGE[tone]} ${className}`}>{children}</span>;
+  return <span className={`inline-flex items-center gap-1 whitespace-nowrap rounded-[4px] px-2 py-0.5 text-xs font-medium ${BADGE[tone]} ${className}`}>{children}</span>;
 }
 
 export function Button({
@@ -25,12 +25,12 @@ export function Button({
 }: React.ButtonHTMLAttributes<HTMLButtonElement> & { variant?: "primary" | "ghost" }) {
   const look =
     variant === "primary"
-      ? "bg-brand text-brand-ink hover:opacity-90 disabled:opacity-40"
-      : "border border-line bg-surface text-ink-2 hover:bg-surface-2 disabled:opacity-40";
+      ? "bg-brand text-brand-ink [--shade:var(--brand-shade)] hover:brightness-105 disabled:opacity-40"
+      : "border border-line bg-surface text-ink-2 [--shade:var(--line)] hover:bg-surface-2 hover:text-ink disabled:opacity-40";
   return (
     <button
       {...props}
-      className={`inline-flex items-center justify-center gap-2 rounded-lg px-3.5 py-2 text-sm font-medium transition disabled:cursor-not-allowed ${look} ${className}`}
+      className={`btn-block mb-[3px] inline-flex items-center justify-center gap-2 rounded-md px-3.5 py-2 text-sm font-medium transition-[transform,box-shadow,filter,background-color] duration-75 disabled:cursor-not-allowed ${look} ${className}`}
     />
   );
 }
@@ -46,7 +46,7 @@ export function TxLink({ hash, mock }: { hash: string | null | undefined; mock?:
 }
 
 export function Card({ children, className = "" }: { children: React.ReactNode; className?: string }) {
-  return <section className={`rounded-xl border border-line bg-surface ${className}`}>{children}</section>;
+  return <section className={`rounded-xl border border-line bg-surface shadow-[0_1px_0_0_var(--line)] ${className}`}>{children}</section>;
 }
 
 /** Gateway configuration, refreshed every 15 s (Main reachability can change). */

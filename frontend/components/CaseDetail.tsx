@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useQuery } from "@tanstack/react-query";
 import { getCase, type CaseWithCheck, type FiredCriterion, type InvestigatorView } from "@/lib/api";
 import { BAND_LABEL, INSPECTION_HINT, isSettled, outcome, steps, type StepState, type Tone } from "@/lib/progress";
+import { Mascot, type Animation } from "./Mascot";
 import { Badge, TxLink, useGatewayConfig, type BadgeTone } from "./ui";
 
 const TONE: Record<Tone, BadgeTone> = { pending: "info", approved: "ok", rejected: "bad", attention: "warn" };
@@ -11,6 +12,12 @@ const BAND_TONE: Record<string, BadgeTone> = { low: "ok", medium: "warn", high: 
 const ROLE_LABEL: Record<string, string> = { invoice: "Invoice-Agent", wallet: "Wallet-Agent", supplier: "Lieferanten-Agent" };
 const VERDICT_TONE: Record<string, BadgeTone> = { CLEAR: "ok", CONCERN: "warn", CRITICAL: "bad", INSUFFICIENT_DATA: "neutral" };
 const AGENT_LABEL: Record<string, string> = { invoice: "Invoice", wallet: "Wallet", research: "Research" };
+const REACTION: Record<Tone, { play: Animation[]; pauseMs: number }> = {
+  pending: { play: ["02_sniff_glasses"], pauseMs: 1500 },
+  approved: { play: ["04_happy_jump"], pauseMs: 1800 },
+  rejected: { play: ["05a_sad_lie_down", "05b_sad_lying_loop"], pauseMs: 0 },
+  attention: { play: ["05_sad_lying"], pauseMs: 3000 },
+};
 
 /** Polls one case every 2 s until it is settled (payout confirmed or a final stop). */
 export function useCase(caseId: string | null) {
@@ -46,7 +53,7 @@ function Stepper({ data }: { data: CaseWithCheck }) {
     <ol className="grid grid-cols-3 gap-x-2 gap-y-3 sm:grid-cols-6">
       {steps(data.case).map((step) => (
         <li key={step.id} className="flex items-center gap-2 text-xs">
-          <span className={`h-2.5 w-2.5 shrink-0 rounded-full border-2 ${DOT[step.state]}`} />
+          <span className={`h-2.5 w-2.5 shrink-0 rounded-[2px] border-2 ${DOT[step.state]}`} />
           <span className={step.state === "pending" || step.state === "skipped" ? "text-ink-3" : "text-ink"}>
             {step.label}
             {step.state === "skipped" && <span className="text-ink-3"> · entfällt</span>}
@@ -62,11 +69,14 @@ function Score({ score, band }: { score: number | null; band: string | null }) {
   return (
     <div className="min-w-40">
       <div className="flex items-baseline gap-1">
-        <span className="tabular text-3xl font-semibold">{score ?? "–"}</span>
+        <span className="tabular font-pixel text-4xl leading-none">{score ?? "–"}</span>
         <span className="text-sm text-ink-3">/ 100</span>
       </div>
-      <div className="mt-1.5 h-1.5 w-full rounded-full bg-surface-2">
-        <div className={`h-1.5 rounded-full ${color} transition-all`} style={{ width: `${score ?? 0}%` }} />
+      {/* Ten blocks, like a hotbar: each one is 10 points. */}
+      <div className="mt-2 grid grid-cols-10 gap-0.5">
+        {Array.from({ length: 10 }, (_, i) => (
+          <span key={i} className={`h-2 rounded-[1px] transition-colors ${(score ?? 0) > i * 10 ? color : "bg-surface-2"}`} />
+        ))}
       </div>
       {band && (
         <Badge tone={BAND_TONE[band]} className="mt-2">
@@ -81,7 +91,7 @@ function CriteriaTable({ title, rows }: { title: string; rows: FiredCriterion[] 
   if (!rows.length) return null;
   return (
     <div>
-      <h4 className="mb-2 text-xs font-semibold uppercase tracking-wide text-ink-3">{title}</h4>
+      <h4 className="mb-2 font-pixel text-sm text-ink-2">{title}</h4>
       <ul className="divide-y divide-line rounded-lg border border-line">
         {rows.map((row) => (
           <li key={row.id} className="grid grid-cols-[3.5rem_1fr_auto] items-start gap-3 px-3 py-2.5 text-sm">
@@ -104,7 +114,7 @@ function CriteriaTable({ title, rows }: { title: string; rows: FiredCriterion[] 
 
 function Investigator({ role, view, mock }: { role: string; view: InvestigatorView; mock: boolean }) {
   return (
-    <div className="rounded-lg border border-line p-3 text-sm">
+    <div className="rounded-lg border border-line bg-surface p-3 text-sm">
       <div className="mb-2 flex items-center justify-between gap-2">
         <span className="font-medium">{ROLE_LABEL[role] ?? role}</span>
         {view.verdict ? <Badge tone={VERDICT_TONE[view.verdict]}>{view.verdict}</Badge> : <Badge tone="info">läuft</Badge>}
@@ -132,6 +142,7 @@ export function CaseBody({ data, mock }: { data: CaseWithCheck; mock: boolean })
       <Stepper data={data} />
 
       <div className="flex flex-wrap items-start gap-6">
+        <Mascot play={REACTION[outcome(view).tone].play} pauseMs={REACTION[outcome(view).tone].pauseMs} scale={1} className="-my-2" />
         <Score score={check?.risk_score ?? view.risk_score} band={check?.band ?? view.band} />
         <dl className="grid flex-1 grid-cols-[auto_1fr] gap-x-4 gap-y-1.5 text-sm">
           <dt className="text-ink-3">Prüfgebühr</dt>
@@ -199,7 +210,7 @@ export function CaseBody({ data, mock }: { data: CaseWithCheck; mock: boolean })
 
       {view.investigators && (
         <div>
-          <h4 className="mb-2 text-xs font-semibold uppercase tracking-wide text-ink-3">Agenten-Review (bezahlt per x402)</h4>
+          <h4 className="mb-2 font-pixel text-sm text-ink-2">Agenten-Review (bezahlt per x402)</h4>
           <div className="grid gap-2 sm:grid-cols-3">
             {(["invoice", "wallet", "supplier"] as const).map((role) => (
               <Investigator key={role} role={role} view={view.investigators![role]} mock={mock} />
@@ -227,7 +238,7 @@ export function CaseDetail({ caseId }: { caseId: string }) {
   return (
     <div className="space-y-4">
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <h1 className="text-lg font-semibold">Prüffall</h1>
+        <h1 className="font-pixel text-2xl">Prüffall</h1>
         <OutcomeBadge data={data} />
       </div>
       <div className="rounded-xl border border-line bg-surface p-4 sm:p-5">

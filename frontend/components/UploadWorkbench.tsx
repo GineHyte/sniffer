@@ -6,6 +6,7 @@ import { caseIdFor, checkFile, formatAda, shortHash } from "@/lib/einvoice";
 import { previewOf } from "@/lib/preview";
 import { countBy, initialQueue, nextToPay, persistable, queueReducer, restorable, type Item } from "@/lib/queue";
 import { CaseBody, OutcomeBadge, useCase } from "./CaseDetail";
+import { Ground, Mascot } from "./Mascot";
 import { Badge, Button, Card, useGatewayConfig, type BadgeTone } from "./ui";
 
 // Pause after Main refused new intakes (503 too_many_unconfirmed_intakes): Preprod confirmations take ~20–60 s.
@@ -98,13 +99,25 @@ export function UploadWorkbench() {
   const paused = queue.pausedUntil > now && countBy(queue, "waiting") > 0;
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-8">
       <div>
-        <h1 className="text-xl font-semibold tracking-tight sm:text-2xl">E-Rechnungen prüfen</h1>
-        <p className="mt-1 max-w-2xl text-sm text-ink-2">
-          XRechnung- oder ZUGFeRD-XML mit Cardano-Zahlungsadresse hochladen. Jede Rechnung wird einzeln per x402 bezahlt und vom Sniffer geprüft:
-          Erstprüfung, bei mittlerem Risiko drei Agenten, danach Freigabe und Auszahlung oder eine begründete Ablehnung.
-        </p>
+        <div className="flex flex-wrap items-end justify-between gap-x-8 gap-y-2">
+          <div className="max-w-xl pb-4">
+            <p className="text-xs font-medium uppercase tracking-[0.18em] text-brand">Agentic Commerce on Cardano</p>
+            <h1 className="mt-2 font-pixel text-3xl leading-tight sm:text-4xl">E-Rechnungen prüfen</h1>
+            <p className="mt-3 text-[15px] leading-relaxed text-ink-2">
+              XRechnung- oder ZUGFeRD-XML mit Cardano-Zahlungsadresse hochladen. Jede Rechnung wird einzeln per x402 bezahlt und vom Sniffer geprüft:
+              Erstprüfung, bei mittlerem Risiko drei Agenten, danach Freigabe und Auszahlung oder eine begründete Ablehnung.
+            </p>
+          </div>
+          <Mascot
+            play={dragging ? ["04_happy_jump"] : ["02_sniff_glasses"]}
+            pauseMs={dragging ? 0 : 2500}
+            className="ml-auto -mb-px"
+            label="Sniffer-Krabbe"
+          />
+        </div>
+        <Ground />
       </div>
 
       {!secure && (
@@ -129,11 +142,11 @@ export function UploadWorkbench() {
           setDragging(false);
           void addFiles(e.dataTransfer.files);
         }}
-        className={`flex cursor-pointer flex-col items-center justify-center rounded-xl border-2 border-dashed px-4 py-10 text-center transition ${
-          dragging ? "border-brand bg-info-bg" : "border-line bg-surface hover:border-brand/60"
+        className={`group flex cursor-pointer flex-col items-center justify-center rounded-xl border-2 border-dashed px-4 py-12 text-center transition focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand ${
+          dragging ? "border-brand bg-info-bg" : "border-line bg-surface hover:border-brand/60 hover:bg-surface-2/40"
         }`}
       >
-        <svg aria-hidden viewBox="0 0 24 24" className="mb-3 h-8 w-8 text-brand" fill="none" stroke="currentColor" strokeWidth="1.6">
+        <svg aria-hidden viewBox="0 0 24 24" className="mb-3 h-8 w-8 text-brand transition-transform group-hover:-translate-y-0.5" fill="none" stroke="currentColor" strokeWidth="1.6">
           <path d="M12 16V4m0 0-4 4m4-4 4 4M4 16v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2" strokeLinecap="round" strokeLinejoin="round" />
         </svg>
         <p className="font-medium">XML-Dateien hierher ziehen oder klicken</p>
@@ -152,7 +165,7 @@ export function UploadWorkbench() {
       </div>
 
       {queue.items.length > 0 && (
-        <Card>
+        <Card className="rise overflow-hidden">
           <div className="flex flex-wrap items-center justify-between gap-3 border-b border-line px-4 py-3">
             <div className="text-sm">
               <span className="font-medium">{queue.items.length} Datei{queue.items.length === 1 ? "" : "en"}</span>
@@ -181,6 +194,15 @@ export function UploadWorkbench() {
                 : `Mit „prüfen“ zahlt die Demo-Wallet „${config.wallet}“ je neuer Rechnung ${formatAda(price)} tADA auf Cardano Preprod. Schon bezahlte Rechnungen werden nicht erneut bezahlt.`}
             </p>
           )}
+          {open > 0 && (
+            <div className="border-b border-line bg-surface-2/50 px-4 pt-3">
+              <div className="flex items-end gap-4">
+                <Mascot play={["03_sniff_trail"]} scale={1} className="-mb-px" />
+                <p className="pb-3 font-pixel text-sm text-ink-2">{paused ? "Kurze Pause …" : "Der Sniffer schnüffelt …"}</p>
+              </div>
+              <Ground className="h-1.5" />
+            </div>
+          )}
           <ul className="divide-y divide-line">
             {queue.items.map((item) => (
               <QueueRow key={item.key} item={item} mock={config?.mode === "mock"} onRemove={() => dispatch({ type: "remove", key: item.key })} onRetry={() => dispatch({ type: "retry", key: item.key })} />
@@ -208,7 +230,7 @@ function QueueRow({ item, mock, onRemove, onRetry }: { item: Item; mock: boolean
   const { data } = useCase(item.phase === "submitted" ? item.caseId : null);
   const p = item.preview;
   return (
-    <li className="px-4 py-3">
+    <li className="rise px-4 py-3 transition-colors hover:bg-surface-2/40">
       <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
         <div className="min-w-0 flex-[1_1_14rem]">
           <div className="flex items-center gap-2">
@@ -239,7 +261,7 @@ function QueueRow({ item, mock, onRemove, onRetry }: { item: Item; mock: boolean
         </div>
         <div className="flex items-center gap-2">
           {item.phase === "submitted" ? <OutcomeBadge data={data} /> : <Badge tone={PHASE[item.phase].tone}>{PHASE[item.phase].label}</Badge>}
-          {data?.case.risk_score != null && <span className="tabular w-10 text-right text-sm font-semibold">{data.case.risk_score}</span>}
+          {data?.case.risk_score != null && <span className="tabular w-10 text-right font-pixel text-base">{data.case.risk_score}</span>}
           {item.phase === "failed" && (
             <Button variant="ghost" onClick={onRetry}>
               Erneut
@@ -258,7 +280,7 @@ function QueueRow({ item, mock, onRemove, onRetry }: { item: Item; mock: boolean
         </div>
       </div>
       {open && data && (
-        <div className="mt-3 rounded-lg bg-bg p-3 sm:p-4">
+        <div className="mt-3 rounded-lg border border-line bg-bg p-3 sm:p-4">
           <CaseBody data={data} mock={mock} />
         </div>
       )}
