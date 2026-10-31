@@ -12,3 +12,7 @@ docs/*.json
 backend/target/
 payout/state/
 *.log
+# Editor backup/undo files (may contain .env secrets)
+*~
+*.un~
+*.swp
