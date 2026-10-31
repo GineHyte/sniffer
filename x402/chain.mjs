@@ -1,4 +1,5 @@
-// Read-only Blockfrost Preprod lookups for payOnce's "can never land" proof (x402/pay.mjs proveUnlandable). No writes, no keys.
+// Read-only Blockfrost Preprod lookups for payOnce's "can never land" proof (x402/pay.mjs proveUnlandable) and the gate's
+// confirmation check (x402/gate.mjs waitConfirmed). No writes, no keys.
 import {BLOCKFROST_PREPROD_URL} from './wallets.mjs';
 
 const TX_HASH_REGEX=/^[0-9a-f]{64}$/;
@@ -28,6 +29,18 @@ export function blockfrostChain({projectId=process.env.BLOCKFROST_API_KEY_PREPRO
    const [tx,tip]=await Promise.all([get(`/txs/${consumer}`),get('/blocks/latest')]);
    if(!Number.isInteger(tx?.block_height)||!Number.isInteger(tip?.height))throw new Error(`Blockfrost has no block height for ${consumer}.`);
    return {txHash:consumer,confirmations:Math.max(0,tip.height-tx.block_height)};
+  },
+  /**
+   * transactionEvidence(txHash): {status:'unknown',confirmations:-2} while Blockfrost has no (valid) tx, else {status:'confirmed',
+   * confirmations} — the same shape as @x402/cardano's signer evidence, for x402/gate.mjs waitConfirmed. Throws on HTTP errors.
+   */
+  async transactionEvidence(txHash){
+   if(!TX_HASH_REGEX.test(String(txHash)))throw new Error('txHash must be 64 lowercase hex characters.');
+   const tx=await get(`/txs/${txHash}`);
+   if(!tx||tx.valid_contract===false)return {status:'unknown',confirmations:-2};
+   const tip=await get('/blocks/latest');
+   if(!Number.isInteger(tx.block_height)||!Number.isInteger(tip?.height))throw new Error(`Blockfrost has no block height for ${txHash}.`);
+   return {status:'confirmed',confirmations:Math.max(0,tip.height-tx.block_height)};
   },
  };
 }
