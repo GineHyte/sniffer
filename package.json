@@ -9,10 +9,11 @@
     "start": "node --env-file-if-exists=.env start.mjs",
     "worker": "node --env-file-if-exists=.env worker.mjs",
     "api": "node --env-file-if-exists=.env --env-file-if-exists=.local/mps-runtime.env agent-api.mjs",
-    "investigator:eve": "node --env-file-if-exists=.env investigator/eve-root.mjs",
-    "investigator:api": "node --env-file-if-exists=.env investigator/api.mjs",
-    "investigator:worker": "node --env-file-if-exists=.env investigator/worker.mjs",
-    "main": "node --env-file-if-exists=.env main/api.mjs",
+    "investigator:eve": "node --env-file-if-exists=.env --env-file-if-exists=.local/live.env investigator/eve-root.mjs",
+    "investigator:api": "node --env-file-if-exists=.env --env-file-if-exists=.local/live.env investigator/api.mjs",
+    "investigator:worker": "node --env-file-if-exists=.env --env-file-if-exists=.local/live.env investigator/worker.mjs",
+    "main": "node --env-file-if-exists=.env --env-file-if-exists=.local/live.env --env-file-if-exists=.local/sniffer-secrets.env main/api.mjs",
+    "stack": "docker compose --env-file .env --env-file .local/live.env --env-file .local/sniffer-secrets.env up -d --build",
     "test": "node --env-file-if-exists=.env --test *.test.mjs agents/*.test.mjs x402/*.test.mjs payout/*.test.mjs investigator/*.test.mjs main/*.test.mjs"
   },
   "dependencies": {

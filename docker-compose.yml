@@ -45,7 +45,14 @@ services:
     build: ./backend
     image: sniffer:dev
     restart: unless-stopped
-    env_file: .env
+    env_file:
+      - .env
+      # T28 live settings and generated secrets (git-ignored); optional so a plain
+      # `docker compose up` still works without them.
+      - path: .local/live.env
+        required: false
+      - path: .local/sniffer-secrets.env
+        required: false
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER:-sniffer}:${POSTGRES_PASSWORD:?set in .env}@postgres:5432/${POSTGRES_DB:-sniffer}
       REDIS_URL: redis://redis:6379/0
