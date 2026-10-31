@@ -25,7 +25,12 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
                 <Mascot play="baby_01_walk" scale={1} />
                 <span className="font-pixel text-lg leading-none tracking-wide">Sniffer</span>
               </Link>
-              <GatewayStatus />
+              <div className="flex items-center gap-4">
+                <Link href="/criteria" className="text-sm text-ink-2 hover:text-ink hover:underline">
+                  Criteria
+                </Link>
+                <GatewayStatus />
+              </div>
             </div>
           </header>
           <main className="mx-auto w-full max-w-5xl flex-1 px-4 py-8 sm:py-10">{children}</main>
