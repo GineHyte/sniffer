@@ -12,7 +12,8 @@ services:
       POSTGRES_DB: ${POSTGRES_DB:-sniffer}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set in .env}
     ports:
-      - "127.0.0.1:5432:5432"
+      # Host port is configurable: the host may already run its own Postgres on 5432.
+      - "127.0.0.1:${POSTGRES_HOST_PORT:-5432}:5432"
     volumes:
       - postgres-data:/var/lib/postgresql/data
     healthcheck:
