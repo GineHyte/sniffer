@@ -2,50 +2,21 @@
 # One-shot local setup for Sniffer. Safe to re-run: it never overwrites existing
 # secrets, wallets or keys unless you type a new value.
 #   1. checks/installs requirements (Node 24, bun, Docker, openssl, Sokosumi CLI)
-#   2. installs packages, creates config files, generated secrets and wallets
+#   2. installs packages, creates config files, generated secrets and the service wallets
+#      (the demo's customer wallet and funding are in scripts/demo-setup.sh)
 #   3. asks for the API keys and writes them to .env
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
-ROOT=$PWD
 SOKOSUMI_VERSION=1.0.4
 
-if [ -t 1 ]; then B=$'\e[1m'; G=$'\e[32m'; Y=$'\e[33m'; R=$'\e[31m'; N=$'\e[0m'; else B= G= Y= R= N=; fi
-ok()   { printf '  %s✓%s %s\n' "$G" "$N" "$*"; }
-warn() { printf '  %s!%s %s\n' "$Y" "$N" "$*"; }
-die()  { printf '  %s✗%s %s\n' "$R" "$N" "$*" >&2; exit 1; }
-step() { printf '\n%s%s%s\n' "$B" "$*" "$N"; }
-
-# Read KEY's value from an env file (empty if missing).
-env_get() { local line; line=$(grep -E "^$2=" "$1" 2>/dev/null | tail -n1) || true; line=${line#*=}; line=${line#\"}; printf '%s' "${line%\"}"; }
-# Set KEY=value in an env file without sed (values may contain any character).
-env_set() {
-  local file=$1 key=$2 value=$3 tmp found=0 line
-  tmp=$(mktemp "$file.XXXXXX")
-  while IFS= read -r line || [ -n "$line" ]; do
-    if [[ $line == "$key="* ]]; then printf '%s=%s\n' "$key" "$value"; found=1; else printf '%s\n' "$line"; fi
-  done < "$file" > "$tmp"
-  [ "$found" = 1 ] || printf '%s=%s\n' "$key" "$value" >> "$tmp"
-  chmod --reference="$file" "$tmp" 2>/dev/null || chmod 600 "$tmp"
-  mv "$tmp" "$file"
-}
+# shellcheck source=scripts/setup-common.sh
+. scripts/setup-common.sh
 
 # ---------------------------------------------------------------------------
 step "1/4 Requirements"
 
-node_major() { node -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0; }
-if [ "$(node_major)" -lt 24 ]; then
-  nvm_node=$(ls -d "$HOME"/.nvm/versions/node/v2[4-9]*/bin 2>/dev/null | sort -V | tail -n1 || true)
-  if [ -z "$nvm_node" ] && [ -s "$HOME/.nvm/nvm.sh" ]; then
-    warn "Node $(node_major) found; installing Node 24 with nvm"
-    # shellcheck disable=SC1091
-    ( set +eu; . "$HOME/.nvm/nvm.sh"; nvm install 24 >/dev/null ) || die "nvm install 24 failed"
-    nvm_node=$(ls -d "$HOME"/.nvm/versions/node/v24*/bin | sort -V | tail -n1)
-  fi
-  [ -n "$nvm_node" ] || die "Node 24+ is required (found $(node_major)). Install it, e.g. with nvm: nvm install 24"
-  export PATH="$nvm_node:$PATH"
-  NODE_PATH_HINT=$nvm_node
-fi
+ensure_node24
 ok "node $(node --version)"
 
 command -v bun >/dev/null || die "bun is required: curl -fsSL https://bun.sh/install | bash"
@@ -88,7 +59,7 @@ else
 fi
 
 wallet_addr() { node x402/wallets.mjs address "$1"; }
-for w in payer main-payer intake inv-invoice inv-wallet inv-supplier; do
+for w in main-payer intake inv-invoice inv-wallet inv-supplier; do
   [ -f ".local/x402/$w.json" ] || { node x402/wallets.mjs create "$w" >/dev/null; ok "created wallet $w"; }
 done
 if [ ! -f .local/payout.env ]; then
@@ -148,15 +119,9 @@ else warn "BLOCKFROST_API_KEY_PREPROD is not set"; fi
 # ---------------------------------------------------------------------------
 step "Next steps"
 cat <<EOF
-  1. Fund these wallets with ~10 tADA each (faucet, network Preprod):
-       payer       $(wallet_addr payer)
-       main-payer  $(wallet_addr main-payer)
-       payout      $(node --env-file=.local/payout.env payout/transfer.mjs address)
-  2. Log in to Sokosumi:  sokosumi --preprod auth login
+  1. Log in to Sokosumi:  sokosumi --preprod auth login
      then set up the Vendor and Coworkers (README "Set up Sokosumi").
-  3. Start the backend:   npm run stack
+  2. Start the backend:   npm run stack
+  3. Before a demo:       bun run demo:setup   (creates the test customer wallet, checks funding)
 EOF
-if [ -n "${NODE_PATH_HINT:-}" ]; then
-  echo "  Note: your default 'node' is older than 24. Add Node 24 to your PATH, e.g. in fish:"
-  echo "        fish_add_path -U $NODE_PATH_HINT"
-fi
+node_path_hint

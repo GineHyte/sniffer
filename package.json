@@ -7,6 +7,7 @@
   },
   "scripts": {
     "setup": "bash scripts/setup.sh",
+    "demo:setup": "bash scripts/demo-setup.sh",
     "start": "node --env-file-if-exists=.env start.mjs",
     "worker": "node --env-file-if-exists=.env worker.mjs",
     "api": "node --env-file-if-exists=.env --env-file-if-exists=.local/mps-runtime.env agent-api.mjs",

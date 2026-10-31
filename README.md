@@ -75,7 +75,7 @@ API reference: `docs/openapi/` has OpenAPI 3.1 specs for the Main API, the backe
 
 ### 1. Install
 
-Quick path: `bun run setup` (or `bash scripts/setup.sh`) checks the requirements, installs packages, creates the config files, secrets and wallets, then asks for your API keys. It is safe to re-run. Afterwards, continue with step 4 (Sokosumi) and fund the wallets. The manual steps follow.
+Quick path: `bun run setup` (or `bash scripts/setup.sh`) checks the requirements, installs packages, creates the config files, secrets and the service wallets, then asks for your API keys. Afterwards, continue with step 4 (Sokosumi). Before a demo, `bun run demo:setup` creates the test customer wallet and runs the preflight, which lists each wallet that needs test ADA. Both are safe to re-run. The manual steps follow.
 
 ```sh
 git clone https://github.com/GineHyte/sniffer.git
