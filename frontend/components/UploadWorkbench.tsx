@@ -185,7 +185,7 @@ export function UploadWorkbench() {
                 Clear list
               </Button>
               <Button disabled={!ready || !config || (!config.main_ok && config.mode === "live")} onClick={() => dispatch({ type: "start" })}>
-                {ready ? `Check ${ready} · ${formatAda(price * BigInt(ready))} tADA` : "Check"}
+                {ready ? `Upload ${ready} · ${formatAda(price * BigInt(ready))} tADA` : "Upload"}
               </Button>
             </div>
           </div>

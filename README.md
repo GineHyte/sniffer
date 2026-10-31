@@ -202,7 +202,7 @@ cd frontend && npm ci && npm run dev                 # http://localhost:3000
 Production build of the UI (same gateway, same port): `cd frontend && npm run build && npm start`.
 Check the mode before uploading: `curl http://127.0.0.1:21952/api/config` must show `"mode":"live"` for a paid run.
 
-Drop one or more `.xml` files, check the preview, then click "prüfen". The queue pays one invoice at a time. When Main
+Drop one or more `.xml` files, check the preview, then click "Upload". The queue pays one invoice at a time. When Main
 answers `503 too_many_unconfirmed_intakes`, the queue pauses for 20 s and retries the same invoice. Each case is
 polled every 2 s until its payout is confirmed or it stops. Submitted cases survive a reload, and every case has a
 link at `/cases/<case_id>`.
