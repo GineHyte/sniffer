@@ -1,203 +1,196 @@
-# TUM Blockchain & AI Hackathon quickstart
+# Sniffer
 
-Start with the [TUM hackathon setup guide](https://www.masumi.network/tum-hackathon).
-It covers your account, Coworker, first task, and payment checkpoints.
-Join the [TUM Sokosumi Workspace](https://preprod.sokosumi.com/join/GTAHB3OQFWgg8rGetMfleiqgeL6_ltdW) with your own account.
+Sniffer checks incoming e-invoices for payment fraud before a company pays them in crypto, and pays the supplier when the invoice is safe.
+A customer submits an XRechnung/ZUGFeRD invoice (EN 16931 XML) whose payment address is a Cardano wallet. Sniffer scores it with deterministic rules, escalates unclear cases to three AI investigators, decides, and, if approved, pays the supplier in ADA.
 
-This starter suggests five team names and recommends one.
-Adapt `agent/instructions.md` to build your own agent.
-Use the [full agent brief](https://www.masumi.network/tum-hackathon/agent) for your coding agent.
-Before handing in your project, follow the [submission checklist](https://www.masumi.network/tum-hackathon/submission).
+It was built for the TUM Blockchain & AI Hackathon on [Masumi](https://www.masumi.network) / [Sokosumi](https://preprod.sokosumi.com). Every service-to-service payment uses [x402](https://www.x402.org) on Cardano. Everything runs on **Cardano Preprod with test ADA**.
 
-## Start the local agent
+## How it works
 
-Use Node.js 24 or newer for the agent and CLI.
+```
+customer ──x402 1 tADA──▶ Main API ──▶ Rust backend: Initial Check (rules, score 0–100)
+                                │
+            ┌───────────────────┼──────────────────────────────┐
+         low (<20)        medium (20–59)                   high (≥60)
+            │                   │                               │
+            │     3 Sokosumi tasks, each investigator           │
+            │     paid via x402: invoice · wallet · supplier    │
+            │     (Claude via Eve) → reports                    │
+            │                   │                               │
+            │        Main LLM decides (code guardrails win)     │
+            ▼                   ▼                               ▼
+     approve + payout    approve + payout / reject           reject
+```
 
-1. Clone this repository and enter its directory:
+- **Initial Check** (`backend/`, Rust): parses and validates the XML (Mustang), normalises it, and runs the criteria in `backend/config/criteria.json` against VIES, Blockfrost, Chainabuse, the OFAC sanctions list, open orders and supplier history. The result is a score and a band.
+- **Investigators** (`investigator/`): one per role. Main creates a Sokosumi task for each one and pays its x402 gate. The role's worker only starts a task that has a confirmed payment, asks its Claude runtime for a structured report, and completes the task.
+- **Decision** (`main/`): an LLM weighs the reports per `promts/main_agent_prompt.txt`. Code guardrails override it: a missing or `INSUFFICIENT_DATA` report means rejected/formal, and a `CRITICAL` report or `DONT_PAY` means rejected/risk.
+- **Payout** (`payout/`): a policy-gated ADA transfer to the invoice's payment address at a fixed `ADA_PER_EUR` rate, recorded in the backend's payout ledger.
+- **Safety rule**: no tADA leaves Sniffer's wallets for a case until the customer's intake payment is confirmed on chain. Payment journals are written before signing, and an uncertain payment stops the case for human inspection instead of retrying.
 
-   ```sh
-   git clone https://github.com/masumi-network/tum-hackathon-quickstart.git
-   cd tum-hackathon-quickstart
-   ```
+Measured on Preprod: a low-risk case reports "approved, payout submitted" about 12 s after the intake payment. A medium-risk case reaches its decision in about 3 min (three paid investigators). Details are in `docs/plans/PROGRESS.md`.
 
-2. Install the locked dependencies and prepare private configuration:
+## Components
 
-   ```sh
-   npm ci
-   cp .env.example .env
-   chmod 600 .env
-   ```
+| Path | What it is | Default address |
+|---|---|---|
+| `backend/` | Rust backend: Initial Check, decisions, payout ledger, supplier history (Postgres + Redis) | `127.0.0.1:8080` (Docker) |
+| `main/` | Main API: customer intake (x402), orchestration, decision, payout | `127.0.0.1:21951` |
+| `investigator/` | Investigator x402 API, Sokosumi worker, Eve runtime launcher per role | APIs `21961–21963`, Eve `21971–21974` |
+| `agent/`, `promts/` | Eve agent definition (Claude via `@ai-sdk/anthropic`) and the four role prompts | |
+| `x402/` | x402 gate, idempotent payer, in-process facilitator, wallet CLI | |
+| `payout/` | Supplier payout transfer (Evolution SDK) | |
+| `scripts/` | `preflight` (read-only health check) and `demo` (test customer) | |
+| `docs/` | Spec (`initial-check-spec.md`, German), plan and progress journal, x402 notes, OpenAPI specs, fixtures | |
 
-3. In `.env`, set `ANTHROPIC_API_KEY` for the Claude API. Eve calls Claude through the native `@ai-sdk/anthropic` provider.
-   `ANTHROPIC_MODEL` defaults to `claude-opus-5-5`.
-   `MODEL_CONTEXT_WINDOW_TOKENS` defaults to `1000000`, the context window of `claude-opus-5-5`, so Eve skips its catalog lookup.
-   If you pick another model, set it to that model's documented context window as a positive whole number of tokens.
-4. Keep `EVE_PORT` and `EVE_URL` consistent. Start the agent:
+API reference: `docs/openapi/` has OpenAPI 3.1 specs for the Main API, the backend and the investigator API.
 
-   ```sh
-   npm start
-   ```
+## Requirements
 
-The agent listens on `127.0.0.1` and loads `.env` automatically.
-Keep this terminal open while you use the worker.
+- Node.js 24 or newer, and npm
+- Docker (it builds the Rust backend; a local Rust toolchain is needed only for backend development)
+- [Sokosumi CLI](https://github.com/masumi-network/sokosumi/tree/main/apps/cli) `1.0.4` and a Sokosumi Preprod account
+- An [Anthropic API key](https://console.anthropic.com) for Claude
+- A [Blockfrost](https://blockfrost.io) project ID for Cardano **Preprod**
+- Test ADA from the [Cardano faucet](https://docs.cardano.org/cardano-testnets/tools/faucet) (network: Preprod)
 
-For extra protection, consider [Socket Firewall](https://socket.dev/products/socket-firewall) for package installs.
-If installed, prefix an install command with `sfw`, such as `sfw npm ci`.
+## Set up
 
-## Connect your Sokosumi Coworker
-
-Install Sokosumi CLI `1.0.4`. This starter uses its runtime adapter.
-Check compatibility before changing that version.
+### 1. Install
 
 ```sh
+git clone https://github.com/GineHyte/sniffer.git
+cd sniffer
+npm ci
 npm install --global @masumi_network/sokosumi@1.0.4
-sokosumi --version
-sokosumi skills
+mkdir -p .local && chmod 700 .local
 ```
 
-1. Follow the [setup guide](https://www.masumi.network/tum-hackathon) to sign in with your own Preprod account.
-   Create your own Vendor and a private Coworker with task access.
-2. Connect the Coworker to your Personal Workspace for the first test.
-   Import its runtime key through the CLI's supported credential interface. Keep the key in the CLI vault.
-3. Set the returned `COWORKER_ID` in `.env`.
-   Keep `PAID_TASKS_ENABLED=false` until you complete the payment setup below.
-4. Start the worker in a second terminal:
+### 2. Configure
 
-   ```sh
-   npm run worker
-   ```
+Configuration lives in four files. None of them may be committed; `.env` and `.local/` are git-ignored.
 
-5. Create a task in your Personal Workspace. Replace `YOUR_COWORKER_ID` with your Coworker ID:
-
-   ```sh
-   sokosumi --preprod tasks create --personal --coworker-id YOUR_COWORKER_ID --description "Suggest names for our hackathon team." --status READY --json
-   ```
-
-Open the task in Sokosumi and check that it reaches `COMPLETED` with an answer.
-Run only one worker for this project. Keep both local services running.
-
-For CLI options, use `sokosumi --help` and its [official documentation](https://github.com/masumi-network/sokosumi/tree/main/apps/cli).
-
-## Switch to the TUM Workspace
-
-Keep both organization settings blank for your first Personal Workspace test.
-Finish active Tasks and pending seller receipt checks before you switch Workspaces.
-
-1. Join the [TUM Sokosumi Workspace](https://preprod.sokosumi.com/join/GTAHB3OQFWgg8rGetMfleiqgeL6_ltdW).
-   Read its actual organization ID and slug:
-
-   ```sh
-   sokosumi --preprod workspaces list --json
-   ```
-
-2. Connect your existing Coworker to that Workspace. Replace each placeholder with your returned IDs:
-
-   ```sh
-   sokosumi --preprod coworkers connect YOUR_COWORKER_ID --vendor-id YOUR_VENDOR_ID --workspace-id YOUR_ORGANIZATION_ID --json
-   sokosumi --preprod workspaces check YOUR_ORGANIZATION_ID --json
-   ```
-
-   If access is `PENDING`, ask a Workspace owner or admin to approve it, then run `connect` again.
-   Continue only when access is `GRANTED` and your account is eligible to create tasks.
-3. Stop the worker. In `.env`, set `SOKOSUMI_ORGANIZATION_ID` and `SOKOSUMI_ORGANIZATION_SLUG` to that Workspace's ID and slug.
-   Set both together. The worker rejects incomplete settings and tasks from another Workspace.
-4. Restart the worker:
-
-   ```sh
-   npm run worker
-   ```
-
-5. Create a task in the TUM Workspace:
-
-   ```sh
-   sokosumi --preprod tasks create --organization-slug YOUR_WORKSPACE_SLUG --coworker-id YOUR_COWORKER_ID --description "Suggest names for our hackathon team." --status READY --json
-   ```
-
-The worker uses the organization slug for task discovery and the organization ID for runtime execution.
-Comments and paid tasks use the same Coworker and Workspace checks.
-To return to Personal Workspace tasks, finish active work, clear both organization settings, and restart the worker.
-
-## Optional Preprod payments
-
-Prepare your own [Masumi Payment Service](https://github.com/masumi-network/masumi-payment-service) with its current setup instructions.
-Use a dedicated database, encryption key, and selling wallet for this project.
-Keep setup secrets, including that node's `ADMIN_KEY`, in `.local/mps.env` with permission `600`.
-Fund your selling wallet with test ADA.
-
-1. Create `docs/` and `.local/` if absent.
-   Save your payment source's `sourceId`, selling wallet's `walletId`, and `sellerAddress` in `docs/payment-state.json`.
-   Read these identifiers from your own MPS responses.
-2. Set `MPS_URL`, `AGENT_API_PORT`, `AGENT_AUTHOR`, and `BLOCKFROST_API_KEY_PREPROD` in `.env`.
-   Use your own name or team name for `AGENT_AUTHOR`.
-3. Create the scoped runtime key, then register the agent:
-
-   ```sh
-   node --env-file=.env --env-file=.local/mps.env payment-registration.mjs key
-   node --env-file=.env --env-file=.local/mps.env payment-registration.mjs register
-   ```
-
-4. Check registration until it confirms:
-
-   ```sh
-   node --env-file=.env --env-file=.local/mps.env payment-registration.mjs
-   ```
-
-5. Complete `docs/registration-state.json` with the confirmed `agentIdentifier`, actual `supportedPaymentSourceIndex`, and selling wallet's `sellerVkey`.
-   Read these from your own confirmed registry and wallet responses.
-   Start `npm run api`, set `PAID_TASKS_ENABLED=true`, and restart the worker.
-
-Enable payments only after registration confirms and the scoped runtime key is saved in `.local/mps-runtime.env`.
-Never copy another project's wallet, registration, or task IDs.
-If a payment or registration write has an uncertain outcome, inspect its saved state before retrying.
-Complete a paid task and check the seller's net receipt before you submit payment evidence.
-
-## Run the Sniffer end-to-end test (Preprod)
-
-This runs one invoice through the whole pipeline: x402 intake payment, Initial Check, three paid investigators on Sokosumi, the Main decision and, if approved, a supplier payout. It spends test ADA only.
-
-1. Start the backend stack: `npm run stack`. Set `VIES_MODE=mock` in `.local/live.env`; the fixtures use made-up VAT IDs that real VIES rejects.
-2. Start one Eve runtime, one x402 API and one worker per investigator role, each in its own terminal (or in the background):
-
-   ```sh
-   npm run investigator:eve -- invoice    # also: wallet, supplier, main
-   npm run investigator:api -- invoice    # also: wallet, supplier
-   npm run investigator:worker -- invoice # also: wallet, supplier
-   ```
-
-3. Log in to the Sokosumi CLI (`sokosumi --preprod auth login`). Main creates the investigator tasks with this login.
-4. Check everything with the read-only preflight. Repeat until it prints `Preflight passed.`:
-
-   ```sh
-   npm run preflight
-   ```
-
-5. Start Main. It pays investigators and suppliers with real Preprod tADA, so it needs an explicit flag:
-
-   ```sh
-   npm run main -- --confirm-live-payments
-   ```
-
-6. In another terminal, submit the test invoice `docs/fixtures/f1.xml` as the customer and follow the case to its decision:
-
-   ```sh
-   npm run demo -- --confirm-live-payment
-   ```
-
-   The demo polls every 2 s (`--poll-ms`), stamps each status line with the time since it started, and ends with a timing summary: intake paid (202), intake confirmed, decision reached, payout submitted, payout confirmed. When the case is `completed` with `payout.state: submitted`, it prints `approved, payout submitted` and polls up to 3 more minutes for `confirmed`. Pass `--no-wait-confirm` to stop right away. It exits 0 for `completed`, also when that wait runs out (with a warning), and non-zero otherwise.
-
-   Latency model: Main answers the intake with `202` as soon as it has verified and submitted the payment, so the customer waits for the submission, not for a block. The intake confirmation (`intake.state`: `submitted` → `confirmed`) and, after the case is `completed`, the supplier payout confirmation run in the background. No money moves before the intake is confirmed: a medium case creates its Sokosumi tasks at once but pays the investigators only after `intake.state: confirmed`, and the payout waits for it too (a low case stays in `initial_check` meanwhile). An intake that fails on chain ends the case as `failed` (`intake_not_confirmed`); one not confirmed within `INTAKE_CONFIRM_TIMEOUT_MS` (default 600000, 10 min) stops it as `needs_inspection` (`intake_unconfirmed`). If the background payout confirmation fails, a `completed` case moves to `needs_inspection` (`payout_<code>`), and the demo then exits non-zero. At most `MAX_UNCONFIRMED_INTAKES` (default 5) intakes may be unconfirmed at once; beyond that `POST /v1/invoices` answers `503 too_many_unconfirmed_intakes` before any payment is taken. Set both variables for Main, for example in `.local/live.env`.
-
-   Running it again with the same invoice only resumes polling. For a new case, pass `--invoice-number <new number>`. Use `npm run demo -- --case <case_id>` to follow an existing case without paying.
-   A second invoice from the same supplier loses S-9 (first invoice), scores low and is auto-approved without investigators. Add `--new-supplier` to swap the seller (VAT BT-31, name BT-27, open order BT-13) for the first VAT that `backend/data/vies-mock.json` marks valid and the backend has no invoice for. It reads `GET /v1/suppliers/{supplier_hash}/history` with `SNIFFER_HMAC_KEY` and `SNIFFER_API_TOKEN`. Without them, pass `--supplier-vat <VAT>` (and optionally `--supplier-name <name>`). `npm run preflight` reports whether the submitted supplier is still fresh.
-   The backend returns the matched open order as `invoice.open_order` (from `backend/data/open-orders.json`), and Main passes it to the invoice and supplier investigators, so a first invoice can be checked against its purchase order. Add `--fresh-wallet` to pay the supplier to a new, never-used address: it creates a local x402 wallet `demo-recipient-<ms>` (mnemonic in `.local/x402/`) and puts its address into BT-84, so S-1 (address already used by another supplier) cannot fire. Example: `npm run demo -- --confirm-live-payment --new-supplier --fresh-wallet` (expected medium, score 20).
-
-## Check your changes
+| File | Contents |
+|---|---|
+| `.env` | `ANTHROPIC_API_KEY`, `BLOCKFROST_API_KEY_PREPROD`, `AGENT_AUTHOR` (template: `.env.example`) |
+| `.local/sniffer-secrets.env` | Backend secrets: `SNIFFER_API_TOKEN`, `SNIFFER_HMAC_KEY`, `POSTGRES_PASSWORD` |
+| `.local/payout.env` | `PAYOUT_MNEMONIC` of the supplier payout wallet |
+| `.local/live.env` | Non-secret settings: wallet addresses, prices, URLs, Sokosumi IDs (template: `live.env.example`) |
 
 ```sh
-npm test
+cp .env.example .env && chmod 600 .env          # then fill in the keys
+cp live.env.example .local/live.env              # addresses and IDs are filled in below
+
+# Generated backend secrets (POSTGRES_PASSWORD must be URL-safe)
+printf 'SNIFFER_API_TOKEN=%s\nSNIFFER_HMAC_KEY=%s\nPOSTGRES_PASSWORD=%s\n' \
+  "$(openssl rand -hex 32)" "$(openssl rand -hex 32)" "$(openssl rand -hex 24)" > .local/sniffer-secrets.env
+chmod 600 .local/sniffer-secrets.env
 ```
 
-These tests check local logic. Test your own model connection, Coworker task, and seller receipt through the full setup flow.
-The current `npm audit` reports three dependency findings: two high and one moderate, across `eve`, `undici`, and `zod`.
-Review these before public deployment. Dependency versions stay pinned in `package-lock.json`.
-Keep `.env`, `.local/`, wallet secrets, and generated resource state out of git.
+`ANTHROPIC_MODEL` defaults to `claude-opus-5-5`. If you choose another model, also set `MODEL_CONTEXT_WINDOW_TOKENS` to its context window.
+
+### 3. Create and fund the wallets
+
+The x402 wallets are created in `.local/x402/`. The CLI prints only addresses, never mnemonics.
+
+```sh
+for w in payer main-payer intake inv-invoice inv-wallet inv-supplier; do
+  printf '%s: ' $w; node --env-file=.env x402/wallets.mjs create $w
+done
+
+# Supplier payout wallet: write a fresh 24-word mnemonic without printing it, then show its address
+node --input-type=module -e "import {PrivateKey} from '@evolution-sdk/evolution'; import {writeFileSync} from 'node:fs'; writeFileSync('.local/payout.env','PAYOUT_MNEMONIC=\"'+PrivateKey.generateMnemonic(256)+'\"\n',{mode:0o600});"
+node --env-file=.env payout/transfer.mjs address
+```
+
+- Put the `intake` address into `INTAKE_PAY_TO`, and the three `inv-*` addresses into `INVESTIGATOR_<ROLE>_PAY_TO` in `.local/live.env`.
+- Fund `payer` (the test customer), `main-payer` (pays investigators) and the payout wallet from the faucet. About 10 tADA each covers several cases.
+- Check a balance with `node --env-file=.env x402/wallets.mjs balance <name>`.
+
+### 4. Set up Sokosumi
+
+Read `sokosumi skills` first. Create your own resources; never reuse another project's IDs.
+
+```sh
+sokosumi --preprod auth login
+sokosumi --preprod workspaces list --json                    # pick the organization Workspace
+sokosumi --preprod vendors create --name "YOUR_VENDOR" --slug your-vendor --json
+for r in invoice wallet supplier; do                          # one private Coworker per investigator
+  sokosumi --preprod coworkers provision --vendor-id VENDOR_ID --name "Sniffer $r investigator" --capability tasks --json
+done
+sokosumi --preprod coworkers connect COWORKER_ID --vendor-id VENDOR_ID --workspace-id ORGANIZATION_ID --json   # per Coworker
+```
+
+- Continue only when `connect` reports `GRANTED`. `PENDING` means a Workspace owner or admin must approve it; then run `connect` again.
+- Import each Coworker's runtime key straight into the OS keychain. The key is never printed:
+
+  ```sh
+  sokosumi --preprod coworkers api-key COWORKER_ID --json \
+    | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>process.stdout.write(JSON.parse(s).apiKey.token))' \
+    | sokosumi runtime key-import --coworker-id COWORKER_ID --api-key-stdin --json
+  ```
+
+- Fill `SOKOSUMI_ORGANIZATION_ID`, `SOKOSUMI_ORGANIZATION_SLUG` and `COWORKER_ID_<ROLE>` in `.local/live.env`.
+- The OAuth login lasts about 2 hours. Main creates the investigator tasks with it, so log in again before long sessions.
+
+### 5. Start the services
+
+Each command runs in its own terminal, or in the background:
+
+```sh
+npm run stack                                        # Postgres, Redis, Rust backend (builds the image)
+npm run investigator:eve -- invoice                  # repeat for: wallet, supplier, main
+npm run investigator:api -- invoice                  # repeat for: wallet, supplier
+npm run investigator:worker -- invoice               # repeat for: wallet, supplier
+npm run main -- --confirm-live-payments              # pays with real Preprod tADA, hence the flag
+```
+
+Restart rules:
+- after backend code or `backend/data/*` changes: `npm run stack`;
+- after prompt changes in `promts/`: the Eve runtimes, which copy the prompts on start;
+- after changes in `main/`, `x402/` or `payout/`: Main and the investigator APIs.
+
+### 6. Check and run a test case
+
+```sh
+npm run preflight                                    # read-only; repeat until "Preflight passed."
+npm run demo -- --confirm-live-payment               # pays 1 tADA intake, submits docs/fixtures/f1.xml, follows the case
+```
+
+The demo prints each status change with the elapsed time, then the decision, explorer links and a timing summary.
+
+| Option | Effect |
+|---|---|
+| `--invoice-number N` | Submit as a new invoice. Resubmitting the same XML only resumes polling. |
+| `--new-supplier` | Swap the seller for a fresh supplier from `backend/data/vies-mock.json` that has no history, so the case is medium and reaches the investigators. |
+| `--fresh-wallet` | Create a new, never-used recipient address. The payout then lands in a wallet you control, and the address has no history. |
+| `--case ID` | Follow an existing case without paying. |
+| `--no-wait-confirm`, `--poll-ms` | Don't wait for the payout confirmation; change the poll interval (default 2 s). |
+
+Example of a medium-risk run: `npm run demo -- --confirm-live-payment --new-supplier --fresh-wallet`.
+
+**Latency model.** Main answers `202` once the intake payment is verified and submitted. The initial check starts right away, and a case counts as `completed` once its payout is submitted. Both confirmations finish in the background, but investigator payments and the payout wait until the intake is confirmed.
+- An intake that fails on chain ends the case as `failed` (`intake_not_confirmed`).
+- An intake not confirmed within `INTAKE_CONFIRM_TIMEOUT_MS` (default 10 min) stops the case as `needs_inspection` (`intake_unconfirmed`).
+- At most `MAX_UNCONFIRMED_INTAKES` (default 5) intakes may be unconfirmed at once. Beyond that, `POST /v1/invoices` answers `503` before any payment is taken.
+
+## Tests
+
+```sh
+npm test                                             # Node tests (no network)
+cd backend && cargo test --lib                       # Rust unit tests
+npx --yes @redocly/cli@2.64.1 lint --skip-rule info-license docs/openapi/*.yaml
+```
+
+For the backend's database integration tests, see "Environment facts" in `docs/plans/PROGRESS.md`.
+
+## Security notes
+
+- Preprod only. The payout code refuses any network other than `EXPECTED_NETWORK=preprod`, Main accepts only `addr_test1…` addresses, and payouts are capped per invoice and per day.
+- Keep `.env`, `.local/` (wallet mnemonics, keys, journals), runtime JSON and logs out of git.
+- All services listen on `127.0.0.1`. The backend listens on `0.0.0.0` inside its container, but compose publishes it only on `127.0.0.1:8080`.
+- Run `npm audit` before any public deployment. Dependency versions are pinned in `package-lock.json`.
+
+## Origins
+
+This repository started from the [TUM hackathon quickstart](https://github.com/masumi-network/tum-hackathon-quickstart), a team-name finder agent. Its single-agent paths remain usable but are not part of Sniffer's flow: `npm start`, `npm run worker`, and the Masumi Payment Service registration in `payment-registration.mjs` and `agent-api.mjs`. See the [hackathon guide](https://www.masumi.network/tum-hackathon) and the [submission checklist](https://www.masumi.network/tum-hackathon/submission).
