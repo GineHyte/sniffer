@@ -1,6 +1,10 @@
 // Main Sniffer intake API (Task 26, plan §2, port 21951).
 //   POST /v1/invoices   behind x402 (customer pays INTAKE_PRICE_LOVELACE to INTAKE_PAY_TO), body {xml} as JSON
 //                       (same shape as Rust POST /v1/initial-check) or raw application/xml. 202 → {case_id, status_url}.
+//                       Early start: the gate (acceptOn 'submitted') hands over a verified, submitted tx (confirmed:false); the
+//                       case starts at once with intake.state 'submitted'. No money moves before the intake is confirmed.
+//                       503 too_many_unconfirmed_intakes when MAX_UNCONFIRMED_INTAKES cases wait for confirmation (checked
+//                       before the gate, so a refused request never pays).
 //   GET  /v1/cases/{id} public status view (no raw invoice data).
 //   GET  /health
 // One paid resource and one case per XML (SHA-256). The case runs asynchronously; see main/orchestrate.mjs.
@@ -10,13 +14,15 @@ import {dirname,join,resolve} from 'node:path';
 import {fileURLToPath,pathToFileURL} from 'node:url';
 import {lovelaceString} from '../x402/pay.mjs';
 import {INVESTIGATOR_ROLES} from '../investigator/contract.mjs';
-import {createCaseStore,intakeIds,CASE_ID_RE,TERMINAL_STATUSES} from './case-store.mjs';
+import {createCaseStore,intakeIds,CASE_ID_RE,intakeAwaiting,hasOpenWork} from './case-store.mjs';
 import {runCase,caseView,DEFAULT_INVESTIGATION_TIMEOUT_MS,DEFAULT_POLL_MS,DEFAULT_LLM_TIMEOUT_MS} from './orchestrate.mjs';
 import {orgArgs} from './sokosumi-tasks.mjs';
 
 export const CONFIRM_FLAG='--confirm-live-payments';
 export const DEFAULT_PORT=21951;
 export const DEFAULT_MAX_XML_BYTES=500_000;
+export const DEFAULT_MAX_UNCONFIRMED_INTAKES=5;
+export const DEFAULT_INTAKE_CONFIRM_TIMEOUT_MS=10*60_000; // the intake requirement allows maxTimeoutSeconds=600
 const ROOT=resolve(dirname(fileURLToPath(import.meta.url)),'..');
 const ADDRESS_RE=/^addr_test1[0-9a-z]{20,}$/;
 
@@ -43,6 +49,8 @@ export function loadConfig(env=process.env){
   port:positiveInt(env,'MAIN_PORT',DEFAULT_PORT),
   stateDir:env.MAIN_STATE_DIR?.trim()||join(ROOT,'.local','main'),
   maxXmlBytes:positiveInt(env,'MAX_XML_BYTES',DEFAULT_MAX_XML_BYTES),
+  maxUnconfirmedIntakes:positiveInt(env,'MAX_UNCONFIRMED_INTAKES',DEFAULT_MAX_UNCONFIRMED_INTAKES),
+  intakeConfirmTimeoutMs:positiveInt(env,'INTAKE_CONFIRM_TIMEOUT_MS',DEFAULT_INTAKE_CONFIRM_TIMEOUT_MS),
   intake:{priceLovelace:lovelaceString(required(env,'INTAKE_PRICE_LOVELACE'),'INTAKE_PRICE_LOVELACE'),payTo:address(env,'INTAKE_PAY_TO')},
   investigators,
   investigatorPriceLovelace:lovelaceString(required(env,'INVESTIGATOR_PRICE_LOVELACE'),'INVESTIGATOR_PRICE_LOVELACE'),
@@ -53,6 +61,28 @@ export function loadConfig(env=process.env){
   payerWallet:env.MAIN_PAYER_WALLET?.trim()||'main-payer',
   eveUrl:env.MAIN_EVE_URL?.trim()||env.EVE_URL?.trim()||undefined,
  };
+}
+
+/**
+ * deps.awaitIntake for runCase: waits for the case's intake tx through the gate (works after a restart).
+ * @returns {(caseId:string)=>Promise<'confirmed'|'failed'|'timeout'>}
+ */
+export function createIntakeWaiter({store,gate,timeoutMs=DEFAULT_INTAKE_CONFIRM_TIMEOUT_MS}){
+ return async caseId=>{
+  const txHash=store.read(caseId)?.intake?.tx_hash;
+  if(typeof txHash!=='string'||!txHash)throw new Error(`Case ${caseId} has no intake tx_hash.`);
+  if(typeof gate?.waitConfirmed!=='function')throw new Error('The intake gate cannot wait for confirmations.');
+  const status=typeof gate.paymentStatus==='function'?gate.paymentStatus(txHash):undefined;
+  if(status==='confirmed'||status==='failed')return status;
+  return gate.waitConfirmed(txHash,{timeoutMs});
+ };
+}
+
+/** Counts cases whose intake tx is submitted but not confirmed and still awaited. An unreadable journal is skipped. */
+export function countUnconfirmedIntakes(store){
+ let count=0;
+ for(const caseId of store.list()){try{if(intakeAwaiting(store.read(caseId)))count+=1;}catch{}}
+ return count;
 }
 
 /** Runs each case at most once at a time in this process. */
@@ -69,7 +99,8 @@ export function createCaseRunner(deps,{run=runCase}={}){
   for(const caseId of deps.store.list()){
    let state;
    try{state=deps.store.read(caseId);}catch(error){deps.log?.(`case=${caseId} event=journal_unreadable`);continue;}
-   if(state&&!TERMINAL_STATUSES.has(state.status))started.push(start(caseId));
+   // Open cases, plus terminal ones with a background intake or payout confirmation still pending.
+   if(hasOpenWork(state))started.push(start(caseId));
   }
   return Promise.all(started);
  }
@@ -117,17 +148,33 @@ function parseIntake(req,body,maxXmlBytes){
  * @param {object} options {config, store, gate, runner, now, log}. `gate` is an x402Gate whose resourceId reads req.snifferResourceId.
  */
 export function createMainApi({config,store,gate,runner,now=()=>new Date(),log=()=>{}}){
+ const maxUnconfirmed=config.maxUnconfirmedIntakes??DEFAULT_MAX_UNCONFIRMED_INTAKES;
+ let reserved=0; // new-case requests between the cap check and the case journal (the gate is async)
  async function intake(req,res){
   const xml=parseIntake(req,await readBody(req,6*config.maxXmlBytes+4096),config.maxXmlBytes);
   const ids=intakeIds(xml);
   req.snifferResourceId=ids.resourceId;
-  const paid=await gate(req,res);
-  if(!paid)return; // the gate already answered (402 payment required, 409 replay, …)
-  let state=store.read(ids.caseId);
-  if(!state){
-   state=store.create({caseId:ids.caseId,xml,intake:{resource_id:ids.resourceId,xml_sha256:ids.xmlSha256,tx_hash:paid.txHash,paid_at:now().toISOString()},now:now()});
-   log(`case=${ids.caseId} event=accepted tx_hash=${paid.txHash}`);
+  // Abuse bound, checked before the gate takes any payment. An existing case (idempotent re-POST) is never refused.
+  const fresh=!store.read(ids.caseId);
+  if(fresh&&countUnconfirmedIntakes(store)+reserved>=maxUnconfirmed){
+   log(`event=intake_refused reason=too_many_unconfirmed_intakes limit=${maxUnconfirmed}`);
+   throw new HttpError(503,'too_many_unconfirmed_intakes');
   }
+  if(fresh)reserved+=1;
+  let paid,state;
+  try{
+   paid=await gate(req,res);
+   if(!paid)return; // the gate already answered (402 payment required, 409 replay, …)
+   state=store.read(ids.caseId);
+   if(!state){
+    // confirmed:false = verified and submitted, not yet on chain. A gate without the flag only answers after confirmation.
+    const confirmed=paid.confirmed!==false;
+    const paidAt=now().toISOString();
+    state=store.create({caseId:ids.caseId,xml,intake:{resource_id:ids.resourceId,xml_sha256:ids.xmlSha256,tx_hash:paid.txHash,paid_at:paidAt,
+     state:confirmed?'confirmed':'submitted',confirmed_at:confirmed?paidAt:null},now:now()});
+    log(`case=${ids.caseId} event=accepted tx_hash=${paid.txHash} intake_state=${state.intake.state}`);
+   }
+  }finally{if(fresh)reserved-=1;}
   runner.start(ids.caseId);
   send(res,202,{case_id:ids.caseId,status:state.status,status_url:`/v1/cases/${ids.caseId}`,payment_tx_hash:paid.txHash});
  }
@@ -162,11 +209,13 @@ async function main(argv){
   import('../x402/gate.mjs'),import('../x402/facilitator.mjs'),import('../x402/wallets.mjs'),import('@x402/cardano'),import('../x402/pay.mjs'),import('../x402/chain.mjs'),
   import('../sokosumi-cli.mjs'),import('../client.mjs'),import('eve/client'),import('../payout/transfer.mjs'),import('./backend.mjs'),import('./decide.mjs')]);
  const store=createCaseStore(config.stateDir);
+ // chain: Blockfrost evidence for the gate's background confirmation and for waitConfirmed after a restart.
+ const chain=blockfrostChain({projectId:process.env.BLOCKFROST_API_KEY_PREPROD});
  const gate=x402Gate({priceLovelace:config.intake.priceLovelace,payTo:config.intake.payTo,facilitator:createInProcessFacilitator(),
-  resourceId:req=>req.snifferResourceId,journalPath:join(config.stateDir,'intake-gate.json'),description:'Sniffer invoice check',onError:error=>log(`event=gate_error error=${String(error?.message).slice(0,200)}`)});
+  resourceId:req=>req.snifferResourceId,journalPath:join(config.stateDir,'intake-gate.json'),description:'Sniffer invoice check',acceptOn:'submitted',chain,
+  onError:error=>log(`event=gate_error error=${String(error?.message).slice(0,200)}`)});
  const wallet=readWallet(config.payerWallet);
  const payer=toClientCardanoSigner({mnemonic:wallet.mnemonic,network:NETWORK,provider:blockfrostProvider(process.env.BLOCKFROST_API_KEY_PREPROD)});
- const chain=blockfrostChain({projectId:process.env.BLOCKFROST_API_KEY_PREPROD});
  const eve=new Client({host:config.eveUrl});
  const payoutBackend=payoutModule.createBackendClient();
  const {mnemonic,accountIndex}=payoutModule.loadPayoutSecrets();
@@ -179,7 +228,11 @@ async function main(argv){
   payOnce:options=>payOnce({...options,chain}),payer,
   answerReport:(role,input,journal,deadline)=>client.answerReport(role,input,journal,deadline,{client:eve}),
   validateReport:client.validateReport,
-  runPayout:({checkId})=>payoutModule.runPayout({checkId,backend:payoutBackend,signer:payoutSigner}),
+  // The case completes once the payout tx is submitted; confirmPayout finishes it in the background (never resubmits).
+  runPayout:({checkId})=>payoutModule.runPayout({checkId,backend:payoutBackend,signer:payoutSigner,awaitConfirm:false}),
+  confirmPayout:({payoutId,txHash})=>payoutModule.confirmPayout({payoutId,txHash,backend:payoutBackend}),
+  // HARD RULE: orchestrate awaits this before any investigator payment or payout.
+  awaitIntake:createIntakeWaiter({store,gate,timeoutMs:config.intakeConfirmTimeoutMs}),
   customerTexts:loadCustomerTexts(),
  };
  const runner=createCaseRunner(deps);

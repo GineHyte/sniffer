@@ -205,9 +205,10 @@ const isRetryableConfirm=error=>error instanceof BackendError&&(error.status===0
 
 // Flow: authorize → (authorized) submitting → build+sign → submit → submitted → confirm polling.
 // `submitted` resumes confirm only; `submitting` / `unknown` stop for manual inspection.
+// awaitConfirm:false returns {state:'submitted'} once /submitted is recorded; the caller then runs confirmPayout() itself.
 export async function runPayout({checkId,backend,signer,clock=defaultClock,journal=createFileJournal(),log=defaultLog,env=process.env,
  maxLovelace=BigInt(Number(env.PAYOUT_MAX_ADA_PER_INVOICE)||DEFAULT_MAX_ADA_PER_INVOICE)*1_000_000n,
- pollIntervalMs=DEFAULT_POLL_INTERVAL_MS,confirmTimeoutMs=DEFAULT_CONFIRM_TIMEOUT_MS,validateAddress=assertPreprodAddress}){
+ pollIntervalMs=DEFAULT_POLL_INTERVAL_MS,confirmTimeoutMs=DEFAULT_CONFIRM_TIMEOUT_MS,validateAddress=assertPreprodAddress,awaitConfirm=true}){
  assertCheckId(checkId);
  assertPreprodEnv(env);
  if(signer?.network!==NETWORK)throw new PayoutError(`Signer must be configured for ${NETWORK}.`,{code:'network_not_allowed'});
@@ -292,27 +293,43 @@ export async function runPayout({checkId,backend,signer,clock=defaultClock,journ
  log(`payout_id=${payoutId} state=submitted event=recorded tx_hash=${txHash}`);
  return confirmLoop(txHash,false);
 
- async function confirmLoop(hash,resumed){
-  const deadline=clock.now()+confirmTimeoutMs;
-  for(;;){
-   try{
-    const result=parseIntent(await backend.confirm(payoutId));
-    if(result.state!=='confirmed')throw fail(`Backend confirm returned state ${result.state}.`,'invalid_response');
-    if(result.txHash&&result.txHash!==hash)throw manual(result.state,hash,'Backend confirmed a different tx hash.','tx_hash_mismatch');
-    journal.record(payoutId,{phase:'confirmed',tx_hash:hash});
-    log(`payout_id=${payoutId} state=confirmed event=confirmed tx_hash=${hash}`);
-    return {payoutId,state:'confirmed',txHash:hash,resumed};
-   }catch(error){
-    if(error instanceof BackendError&&error.status===409&&error.code==='tx_mismatch')throw manual('unknown',hash,'The on-chain transaction does not pay to_address at least lovelace.','tx_mismatch');
-    if(!isRetryableConfirm(error)){
-     if(error instanceof BackendError)throw fail(`Backend confirm failed: ${error.code} (HTTP ${error.status}).`,error.code,{status:error.status,txHash:hash});
-     throw error;
-    }
-    log(`payout_id=${payoutId} state=submitted event=confirm_pending code=${error.code} tx_hash=${hash}`);
+ function confirmLoop(hash,resumed){
+  if(!awaitConfirm)return {payoutId,state:'submitted',txHash:hash,resumed};
+  return confirmPayout({payoutId,txHash:hash,backend,clock,journal,log,pollIntervalMs,confirmTimeoutMs,resumed});
+ }
+}
+
+// Confirm polling for a submitted intent (spec §12.5 /confirm). Builds and submits nothing, so it is safe to rerun after a
+// restart. Retries only tx_not_found, 503 and network errors until confirmTimeoutMs; everything else throws.
+export async function confirmPayout({payoutId,txHash,backend,clock=defaultClock,journal=createFileJournal(),log=defaultLog,
+ pollIntervalMs=DEFAULT_POLL_INTERVAL_MS,confirmTimeoutMs=DEFAULT_CONFIRM_TIMEOUT_MS,resumed=true}){
+ assertPayoutId(payoutId);assertTxHash(txHash);
+ const hash=txHash;
+ const fail=(message,code,extra={})=>new PayoutError(message,{code,payoutId,state:'submitted',...extra});
+ const manual=(state,tx,reason,code)=>{
+  const error=new PayoutError(manualSteps(payoutId,state,tx,redact(reason)),{code,payoutId,state,txHash:tx,manual:true});
+  log(`payout_id=${payoutId} state=${state} event=manual_inspection code=${code}${tx?` tx_hash=${tx}`:''}`);
+  return error;
+ };
+ const deadline=clock.now()+confirmTimeoutMs;
+ for(;;){
+  try{
+   const result=parseIntent(await backend.confirm(payoutId));
+   if(result.state!=='confirmed')throw fail(`Backend confirm returned state ${result.state}.`,'invalid_response');
+   if(result.txHash&&result.txHash!==hash)throw manual(result.state,hash,'Backend confirmed a different tx hash.','tx_hash_mismatch');
+   journal.record(payoutId,{phase:'confirmed',tx_hash:hash});
+   log(`payout_id=${payoutId} state=confirmed event=confirmed tx_hash=${hash}`);
+   return {payoutId,state:'confirmed',txHash:hash,resumed};
+  }catch(error){
+   if(error instanceof BackendError&&error.status===409&&error.code==='tx_mismatch')throw manual('unknown',hash,'The on-chain transaction does not pay to_address at least lovelace.','tx_mismatch');
+   if(!isRetryableConfirm(error)){
+    if(error instanceof BackendError)throw fail(`Backend confirm failed: ${error.code} (HTTP ${error.status}).`,error.code,{status:error.status,txHash:hash});
+    throw error;
    }
-   if(clock.now()+pollIntervalMs>deadline)throw fail(`Confirmation timed out for ${payoutId}. State stays submitted; rerun "pay" later to resume confirm (it builds no new transaction).`,'confirm_timeout',{state:'submitted',txHash:hash});
-   await clock.sleep(pollIntervalMs);
+   log(`payout_id=${payoutId} state=submitted event=confirm_pending code=${error.code} tx_hash=${hash}`);
   }
+  if(clock.now()+pollIntervalMs>deadline)throw fail(`Confirmation timed out for ${payoutId}. State stays submitted; rerun "pay" later to resume confirm (it builds no new transaction).`,'confirm_timeout',{state:'submitted',txHash:hash});
+  await clock.sleep(pollIntervalMs);
  }
 }
 

@@ -6,9 +6,9 @@ import {existsSync} from 'node:fs';
 import {decodePaymentRequiredHeader,encodePaymentSignatureHeader} from '@x402/core/http';
 import {decodeCardanoTransaction} from '@x402/cardano';
 import {x402Gate} from '../x402/gate.mjs';
-import {createMainApi,createCaseRunner,loadConfig} from './api.mjs';
+import {createMainApi,createCaseRunner,loadConfig,createIntakeWaiter,countUnconfirmedIntakes} from './api.mjs';
 import {intakeIds} from './case-store.mjs';
-import {tempStore,testConfig,F9_XML,ADDR,seedCase} from './test-fixtures.mjs';
+import {tempStore,testConfig,F9_XML,ADDR,seedCase,fakeGate} from './test-fixtures.mjs';
 
 const NETWORK='cardano:preprod';
 
@@ -68,6 +68,7 @@ test('paid intake → 202 with case id and status URL; the case starts once; rep
   assert.deepEqual(body,{case_id:caseId,status:'accepted',status_url:`/v1/cases/${caseId}`,payment_tx_hash:tx.txHash});
   assert.deepEqual(started,[caseId]);
   assert.equal(store.read(caseId).intake.tx_hash,tx.txHash);
+  assert.equal(store.read(caseId).intake.state,'confirmed','a gate without the confirmed flag answers only after confirmation');
   assert.equal(existsSync(store.xmlPath(caseId)),true);
 
   const view=await (await fetch(`${base}${body.status_url}`)).json();
@@ -142,10 +143,113 @@ test('loadConfig validates required settings and uses safe defaults',()=>{
  const config=loadConfig(env);
  assert.equal(config.port,21951);
  assert.equal(config.investigationTimeoutMs,15*60_000);
+ assert.equal(config.maxUnconfirmedIntakes,5);
+ assert.equal(config.intakeConfirmTimeoutMs,10*60_000);
+ assert.equal(loadConfig({...env,MAX_UNCONFIRMED_INTAKES:'2'}).maxUnconfirmedIntakes,2);
+ assert.throws(()=>loadConfig({...env,MAX_UNCONFIRMED_INTAKES:'0'}),/MAX_UNCONFIRMED_INTAKES/);
  assert.equal(config.investigators.wallet.url,'http://127.0.0.1:21962');
  assert.deepEqual(config.taskArgs,['--organization-slug','team-ws']);
  assert.throws(()=>loadConfig({...env,COWORKER_ID_WALLET:''}),/COWORKER_ID_WALLET/);
  assert.throws(()=>loadConfig({...env,INTAKE_PAY_TO:'addr1qmainnet'}),/INTAKE_PAY_TO/);
  assert.throws(()=>loadConfig({...env,INVESTIGATOR_PRICE_LOVELACE:'1.5'}),/INVESTIGATOR_PRICE_LOVELACE/);
  assert.throws(()=>loadConfig({...env,INVESTIGATION_TIMEOUT_MS:'-1'}),/INVESTIGATION_TIMEOUT_MS/);
+});
+
+// ---- Early start: gate acceptOn 'submitted' (fake gate) ----
+async function withFakeGate(run,{config=testConfig(),gate=fakeGate()}={}){
+ const temp=tempStore();
+ const started=[];
+ const server=createServer(createMainApi({config,store:temp.store,gate,runner:{start:caseId=>started.push(caseId)}}));
+ await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
+ const base=`http://127.0.0.1:${server.address().port}`;
+ try{await run({base,store:temp.store,started,gate});}
+ finally{await new Promise(resolve=>server.close(resolve));temp.cleanup();}
+}
+const xmlN=n=>F9_XML.replace('RE-2026-0412',`RE-CAP-${n}`);
+
+test('a submitted (unconfirmed) intake → 202 at once, case starts with intake.state submitted',async()=>{
+ await withFakeGate(async({base,store,started,gate})=>{
+  const response=await post(base,{xml:F9_XML});
+  assert.equal(response.status,202);
+  const body=await response.json();
+  const {caseId,xmlSha256}=intakeIds(F9_XML);
+  assert.deepEqual(body,{case_id:caseId,status:'accepted',status_url:`/v1/cases/${caseId}`,payment_tx_hash:xmlSha256});
+  assert.deepEqual(started,[caseId]);
+  const intake=store.read(caseId).intake;
+  assert.deepEqual([intake.state,intake.tx_hash,intake.confirmed_at],['submitted',xmlSha256,null]);
+  assert.ok(intake.paid_at);
+  const view=await (await fetch(`${base}${body.status_url}`)).json();
+  assert.deepEqual(view.intake,{state:'submitted',tx_hash:xmlSha256,paid_at:intake.paid_at,confirmed_at:null});
+  assert.equal(view.payout,null);
+  assert.equal(gate.calls.gate,1);
+ });
+});
+
+test('MAX_UNCONFIRMED_INTAKES: a new intake beyond the cap → 503 before the gate takes any payment',async()=>{
+ await withFakeGate(async({base,store,gate})=>{
+  const first=seedCase(store,xmlN(1),{state:'submitted'});
+  seedCase(store,xmlN(2),{state:'submitted'});
+  seedCase(store,xmlN(3),{state:'confirmed'});
+  assert.equal(countUnconfirmedIntakes(store),2);
+  const refused=await post(base,{xml:xmlN(4)});
+  assert.equal(refused.status,503);
+  assert.deepEqual(await refused.json(),{error:'too_many_unconfirmed_intakes'});
+  assert.equal(gate.calls.gate,0,'no payment is taken for a refused request');
+  assert.equal(store.list().length,3);
+  // An existing case is idempotent and never refused.
+  assert.equal((await post(base,{xml:xmlN(1)})).status,202);
+  // Cases stopped for inspection or with a timed-out wait no longer count.
+  store.write({...store.read(first),status:'needs_inspection'});
+  assert.equal((await post(base,{xml:xmlN(4)})).status,202);
+  assert.equal(countUnconfirmedIntakes(store),2);
+ },{config:testConfig({maxUnconfirmedIntakes:2})});
+});
+
+test('MAX_UNCONFIRMED_INTAKES also bounds concurrent requests that are still inside the gate',async()=>{
+ let release;
+ const block=new Promise(resolve=>{release=resolve;});
+ await withFakeGate(async({base,gate})=>{
+  const pending=post(base,{xml:xmlN(1)});
+  for(let i=0;i<200&&gate.calls.gate===0;i++)await new Promise(resolve=>setTimeout(resolve,1));
+  assert.equal(gate.calls.gate,1);
+  const second=await post(base,{xml:xmlN(2)});
+  assert.equal(second.status,503);
+  release();
+  assert.equal((await pending).status,202);
+  assert.equal(gate.calls.gate,1);
+ },{config:testConfig({maxUnconfirmedIntakes:1}),gate:fakeGate({block})});
+});
+
+test('createIntakeWaiter waits on the case intake tx through the gate',async()=>{
+ const temp=tempStore();
+ try{
+  const caseId=seedCase(temp.store,F9_XML,{state:'submitted'});
+  const gate=fakeGate({status:'submitted',wait:async()=>'timeout'});
+  assert.equal(await createIntakeWaiter({store:temp.store,gate,timeoutMs:1234})(caseId),'timeout');
+  assert.deepEqual(gate.calls.wait,[['ab'.repeat(32),{timeoutMs:1234}]]);
+  const known=fakeGate({status:'confirmed'});
+  assert.equal(await createIntakeWaiter({store:temp.store,gate:known})(caseId),'confirmed');
+  assert.deepEqual(known.calls.wait,[],'a status the gate already knows needs no wait');
+  await assert.rejects(createIntakeWaiter({store:temp.store,gate:async()=>null})(caseId),/cannot wait/);
+ }finally{temp.cleanup();}
+});
+
+test('resumeAll also restarts completed cases with a pending intake or payout confirmation',async()=>{
+ const temp=tempStore();
+ try{
+  const s=temp.store;
+  const payoutPending=seedCase(s,xmlN(1));
+  s.write({...s.read(payoutPending),status:'completed',steps:{payout:{phase:'submitted',state:'submitted',payout_id:'pay_x',tx_hash:'cd'.repeat(32)}}});
+  const intakePending=seedCase(s,xmlN(2),{state:'submitted'});
+  s.write({...s.read(intakePending),status:'completed'});
+  const inspected=seedCase(s,xmlN(3),{state:'submitted'});
+  s.write({...s.read(inspected),status:'needs_inspection'});
+  const timedOut=seedCase(s,xmlN(4),{state:'submitted',timed_out_at:'2026-10-31T10:10:00.000Z'});
+  s.write({...s.read(timedOut),status:'completed'});
+  const confirmed=seedCase(s,xmlN(5),{state:'confirmed'});
+  s.write({...s.read(confirmed),status:'completed',steps:{payout:{phase:'done',state:'confirmed'}}});
+  const runs=[];
+  await createCaseRunner({store:s,log:()=>{}},{run:async caseId=>{runs.push(caseId);}}).resumeAll();
+  assert.deepEqual(runs.sort(),[payoutPending,intakePending].sort());
+ }finally{temp.cleanup();}
 });

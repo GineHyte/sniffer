@@ -4,7 +4,7 @@ import {mkdtempSync,writeFileSync,readFileSync,rmSync,existsSync} from 'node:fs'
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import * as evolution from '@evolution-sdk/evolution';
-import {runPayout,recordSubmitted,createBackendClient,createEvolutionSigner,createMemoryJournal,createFileJournal,loadPayoutSecrets,
+import {runPayout,confirmPayout,recordSubmitted,createBackendClient,createEvolutionSigner,createMemoryJournal,createFileJournal,loadPayoutSecrets,
  parseIntent,redact,assertPreprodAddress,PayoutError,BackendError,BLOCKFROST_PREPROD_URL} from './transfer.mjs';
 
 const CHECK='chk_01JC2M4N6P8Q0R2S4T6V8W0X2Y';
@@ -290,4 +290,35 @@ test('parseIntent and redact helpers',()=>{
  assert.equal(parseIntent(view('authorized')).lovelace,47600000n);
  assert.equal(redact(`x ${TO} y`),'x [address] y');
  assert.equal(redact('secret-value-123 ok',['secret-value-123']),'[redacted] ok');
+});
+
+test('awaitConfirm:false returns submitted after /submitted; confirmPayout then confirms without building anything',async()=>{
+ const backend=fakeBackend({authorize:[view('authorized')],submitting:[view('submitting')],submitted:[view('submitted',{tx_hash:TX})],confirm:[notFound(),view('confirmed',{tx_hash:TX})]});
+ const signer=fakeSigner();
+ const journal=createMemoryJournal();
+ const result=await run({backend,signer,journal,awaitConfirm:false});
+ assert.deepEqual(result,{payoutId:PAYOUT,state:'submitted',txHash:TX,resumed:false});
+ assert.deepEqual(backend.calls.map(call=>call[0]),['authorize','submitting','submitted']);
+ assert.deepEqual(journal.entries.get(PAYOUT),{phase:'submitted',tx_hash:TX});
+ const confirmed=await confirmPayout({payoutId:PAYOUT,txHash:TX,backend,clock:clock(),journal,log:silent(),pollIntervalMs:1000,confirmTimeoutMs:5000});
+ assert.deepEqual(confirmed,{payoutId:PAYOUT,state:'confirmed',txHash:TX,resumed:true});
+ assert.deepEqual(backend.calls.map(call=>call[0]),['authorize','submitting','submitted','confirm','confirm']);
+ assert.equal(signer.stats.built,1);assert.equal(signer.stats.submitted,1);
+ assert.deepEqual(journal.entries.get(PAYOUT),{phase:'confirmed',tx_hash:TX});
+});
+
+test('awaitConfirm:false on an already submitted intent returns it without confirming or building',async()=>{
+ const backend=fakeBackend({authorize:[view('submitted',{tx_hash:TX})]});
+ const signer=fakeSigner();
+ assert.deepEqual(await run({backend,signer,awaitConfirm:false}),{payoutId:PAYOUT,state:'submitted',txHash:TX,resumed:true});
+ assert.equal(signer.stats.built,0);
+});
+
+test('confirmPayout keeps the fail-closed rules: timeout stays submitted, tx_mismatch needs manual inspection, bad ids are refused',async()=>{
+ const opts={clock:clock(),journal:createMemoryJournal(),log:silent(),pollIntervalMs:1000,confirmTimeoutMs:3000};
+ await assert.rejects(confirmPayout({payoutId:PAYOUT,txHash:TX,backend:fakeBackend({confirm:[notFound()]}),...opts}),
+  error=>error.code==='confirm_timeout'&&error.state==='submitted'&&error.txHash===TX&&error.payoutId===PAYOUT);
+ await assert.rejects(confirmPayout({payoutId:PAYOUT,txHash:TX,backend:fakeBackend({confirm:[new BackendError('x',{status:409,code:'tx_mismatch'})]}),...opts,clock:clock()}),
+  error=>error.code==='tx_mismatch'&&error.manual===true&&/MANUAL INSPECTION/.test(error.message));
+ await assert.rejects(confirmPayout({payoutId:PAYOUT,txHash:'zz',backend:fakeBackend({}),...opts}),error=>error.code==='invalid_tx_hash');
 });

@@ -7,6 +7,15 @@ import {writeJsonAtomic} from '../x402/pay.mjs';
 
 export const CASE_ID_RE=/^case-[0-9a-f]{32}$/;
 export const TERMINAL_STATUSES=new Set(['completed','failed','needs_inspection']);
+// Intake states: 'submitted' (customer tx verified and submitted, not yet on chain), 'confirmed', 'failed'.
+// A journal from before the early start has no state; it was accepted only after a confirmed settle.
+export const intakeState=state=>state?.intake?(state.intake.state??'confirmed'):null;
+/** The customer's intake tx is not confirmed yet and something still waits for it (counts against MAX_UNCONFIRMED_INTAKES). */
+export const intakeAwaiting=state=>intakeState(state)==='submitted'&&state.status!=='needs_inspection'&&!state.intake.timed_out_at;
+/** A completed case whose payout tx is submitted and still waits for on-chain confirmation. */
+export const payoutAwaiting=state=>state?.status==='completed'&&state.steps?.payout?.phase==='submitted';
+/** True while a case still has work for the runner: an open case, or a background intake/payout confirmation. */
+export const hasOpenWork=state=>!!state&&(!TERMINAL_STATUSES.has(state.status)||intakeAwaiting(state)||payoutAwaiting(state));
 export const assertCaseId=id=>{if(typeof id!=='string'||!CASE_ID_RE.test(id))throw new Error('Invalid case ID');return id;};
 
 /** The intake binds one paid resource and one case to the SHA-256 of the submitted XML. */

@@ -4,13 +4,13 @@ import {existsSync} from 'node:fs';
 import {payOnce as realPayOnce} from '../x402/pay.mjs';
 import {runCase,caseView} from './orchestrate.mjs';
 import {loadCustomerTexts} from './decide.mjs';
-import {mocks,tempStore,seedCase,testConfig,fakeClock,investigatorReport,ROLES,CHECK_ID,ADDR,checkResult} from './test-fixtures.mjs';
+import {mocks,tempStore,seedCase,testConfig,fakeClock,investigatorReport,ROLES,CHECK_ID,ADDR,checkResult,fakeIntake} from './test-fixtures.mjs';
 
 const customerTexts=loadCustomerTexts();
 
 function deps(store,m,extra={}){
  return {config:testConfig(),store,backend:m.backend,sokosumi:m.sokosumi,payOnce:m.payOnce,payer:{fake:true},answerReport:m.answerReport,
-  runPayout:m.runPayout,clock:fakeClock(),customerTexts,log:()=>{},...extra};
+  runPayout:m.runPayout,confirmPayout:m.confirmPayout,clock:fakeClock(),customerTexts,log:()=>{},...extra};
 }
 
 async function withCase(run){
@@ -395,5 +395,155 @@ test('an initial check refused by the backend fails the case; an unknown outcome
   assert.equal(state.status,'needs_inspection');
   assert.equal(state.inspection.code,'initial_check_unknown');
   assert.equal(m.calls.initialCheck,1);
+ });
+});
+
+// ---- Early start (intake 'submitted') and async payout confirmation ----
+const PAYOUT_ID='pay_01JBX7ZQ8V3K6M2N4P5R7S9T0X';
+const submittedPayout=async()=>({payoutId:PAYOUT_ID,state:'submitted',txHash:'cd'.repeat(32),resumed:false});
+const tick=()=>new Promise(resolve=>setImmediate(resolve));
+async function until(predicate,label='condition'){for(let i=0;i<500&&!predicate();i++)await tick();assert.ok(predicate(),`timed out waiting for ${label}`);}
+function blocker(){let release;const promise=new Promise(resolve=>{release=resolve;});return {promise,release};}
+async function withSubmittedCase(run){
+ const temp=tempStore();
+ try{await run(temp.store,seedCase(temp.store,undefined,{state:'submitted',paid_at:'2026-10-31T10:00:00.000Z',confirmed_at:null}));}finally{temp.cleanup();}
+}
+
+test('early start, low: initial check runs at once, payout waits for the intake, the case completes with the payout submitted, then confirms',async()=>{
+ await withSubmittedCase(async(store,caseId)=>{
+  const intake=fakeIntake();
+  const confirmGate=blocker();
+  const m=mocks({band:'low',payout:submittedPayout,confirm:async({payoutId,txHash})=>{await confirmGate.promise;return {payoutId,state:'confirmed',txHash};}});
+  const running=runCase(caseId,deps(store,m,{awaitIntake:intake.awaitIntake}));
+  await until(()=>intake.waiting===1,'intake wait');
+  assert.equal(m.calls.initialCheck,1,'the initial check does not wait for the intake');
+  assert.deepEqual(m.calls.payouts,[],'no payout before the intake is confirmed');
+  assert.equal(caseView(store.read(caseId)).intake.state,'submitted');
+  assert.notEqual(store.read(caseId).status,'completed');
+  intake.resolve('confirmed');
+  await until(()=>m.calls.confirms.length===1,'payout confirmation start');
+  const mid=store.read(caseId);
+  assert.equal(mid.status,'completed','the case completes once the payout is submitted');
+  assert.deepEqual(caseView(mid).payout,{phase:'submitted',state:'submitted',payout_id:PAYOUT_ID,tx_hash:'cd'.repeat(32),code:null});
+  assert.equal(caseView(mid).intake.state,'confirmed');
+  assert.ok(mid.intake.confirmed_at);
+  assert.deepEqual(m.calls.confirms[0],{payoutId:PAYOUT_ID,txHash:'cd'.repeat(32),checkId:CHECK_ID});
+  confirmGate.release();
+  const state=await running;
+  assert.equal(state.status,'completed');
+  assert.deepEqual([state.steps.payout.phase,state.steps.payout.state],['done','confirmed']);
+  assert.equal(caseView(store.read(caseId)).payout.state,'confirmed');
+  assert.deepEqual(m.calls.payouts,[CHECK_ID]);
+ });
+});
+
+test('early start, medium: tasks are created while the intake is pending, but no investigator is paid before it is confirmed',async()=>{
+ await withSubmittedCase(async(store,caseId)=>{
+  const intake=fakeIntake();
+  const m=mocks({payout:submittedPayout});
+  const running=runCase(caseId,deps(store,m,{awaitIntake:intake.awaitIntake}));
+  await until(()=>intake.waiting===1,'intake wait');
+  assert.equal(m.calls.creates.length,3);
+  assert.equal(m.calls.payments.length,0);
+  intake.resolve('confirmed');
+  const state=await running;
+  assert.equal(state.status,'completed',JSON.stringify(state.inspection));
+  assert.equal(m.calls.payments.length,3);
+  assert.deepEqual(m.calls.payouts,[CHECK_ID]);
+  assert.equal(intake.calls.length,1,'a confirmed intake is not awaited again before the payout');
+  assert.deepEqual([state.intake.state,state.steps.payout.state],['confirmed','confirmed']);
+ });
+});
+
+test('intake failed → case failed (intake_not_confirmed), no investigator payment and no payout',async()=>{
+ for(const band of ['low','medium']){
+  await withSubmittedCase(async(store,caseId)=>{
+   const m=mocks({band});
+   const state=await runCase(caseId,deps(store,m,{awaitIntake:fakeIntake('failed').awaitIntake}));
+   assert.equal(state.status,'failed');
+   assert.equal(state.inspection.code,'intake_not_confirmed');
+   assert.equal(state.intake.state,'failed');
+   assert.equal(caseView(state).intake.state,'failed');
+   assert.equal(m.calls.payments.length+m.calls.payouts.length,0);
+   // A rerun never pays either.
+   await runCase(caseId,deps(store,m,{awaitIntake:fakeIntake('confirmed').awaitIntake}));
+   assert.equal(m.calls.payments.length+m.calls.payouts.length,0);
+  });
+ }
+});
+
+test('intake timeout (or a failing wait) → needs_inspection (intake_unconfirmed), no payments',async()=>{
+ const failing={awaitIntake:async()=>{throw new Error('gate journal unreadable');}};
+ for(const wait of [fakeIntake('timeout'),failing]){
+  await withSubmittedCase(async(store,caseId)=>{
+   const m=mocks({band:'low'});
+   const state=await runCase(caseId,deps(store,m,{awaitIntake:wait.awaitIntake}));
+   assert.equal(state.status,'needs_inspection');
+   assert.equal(state.inspection.code,'intake_unconfirmed');
+   assert.equal(state.intake.state,'submitted');
+   assert.ok(state.intake.timed_out_at);
+   assert.equal(m.calls.payouts.length,0);
+  });
+ }
+ // No awaitIntake wired: fail closed.
+ await withSubmittedCase(async(store,caseId)=>{
+  const m=mocks({band:'medium'});
+  const state=await runCase(caseId,deps(store,m));
+  assert.equal(state.inspection.code,'intake_unconfirmed');
+  assert.equal(m.calls.payments.length,0);
+ });
+});
+
+test('high case completes without waiting for the intake; the intake state is settled afterwards',async()=>{
+ for(const outcome of ['confirmed','failed']){
+  await withSubmittedCase(async(store,caseId)=>{
+   const intake=fakeIntake();
+   const m=mocks({band:'high'});
+   const running=runCase(caseId,deps(store,m,{awaitIntake:intake.awaitIntake}));
+   await until(()=>store.read(caseId).status==='completed','high case completed');
+   assert.equal(store.read(caseId).intake.state,'submitted');
+   intake.resolve(outcome);
+   const state=await running;
+   assert.equal(state.status,'completed');
+   assert.equal(state.intake.state,outcome);
+   assert.equal(m.calls.payments.length+m.calls.payouts.length,0);
+  });
+ }
+});
+
+test('restart resumes the intake wait (initial check not resent) and the payout confirmation (payout never resubmitted)',async()=>{
+ await withSubmittedCase(async(store,caseId)=>{
+  const m=mocks({band:'low',payout:submittedPayout,confirm:()=>new Promise(()=>{})});
+  // First process: stops while waiting for the intake (the promise is abandoned, as on a crash).
+  runCase(caseId,deps(store,m,{awaitIntake:()=>new Promise(()=>{})}));
+  await until(()=>store.read(caseId).steps.initial_check?.phase==='done','initial check');
+  await tick();
+  // Second process: re-awaits the intake, pays out, completes with payout submitted; confirmation hangs again (crash).
+  runCase(caseId,deps(store,m,{awaitIntake:fakeIntake('confirmed').awaitIntake}));
+  await until(()=>store.read(caseId).status==='completed','completed after resume');
+  assert.equal(m.calls.initialCheck,1);
+  assert.deepEqual(m.calls.payouts,[CHECK_ID]);
+  assert.equal(store.read(caseId).steps.payout.state,'submitted');
+  // Third process: a completed case with payout.state submitted resumes confirmation only.
+  const m2=mocks({band:'low'});
+  const state=await runCase(caseId,deps(store,m2,{awaitIntake:fakeIntake('confirmed').awaitIntake}));
+  assert.deepEqual([state.status,state.steps.payout.phase,state.steps.payout.state],['completed','done','confirmed']);
+  assert.equal(m2.calls.payouts.length+m2.calls.initialCheck,0,'nothing is sent again');
+  assert.deepEqual(m2.calls.confirms,[{payoutId:PAYOUT_ID,txHash:'cd'.repeat(32),checkId:CHECK_ID}]);
+ });
+});
+
+test('a failed background payout confirmation stops the case for inspection without resubmitting',async()=>{
+ await withSubmittedCase(async(store,caseId)=>{
+  const timeout=Object.assign(new Error('Confirmation timed out'),{code:'confirm_timeout',state:'submitted',payoutId:PAYOUT_ID});
+  const m=mocks({band:'low',payout:submittedPayout,confirm:async()=>{throw timeout;}});
+  const state=await runCase(caseId,deps(store,m,{awaitIntake:fakeIntake('confirmed').awaitIntake}));
+  assert.equal(state.status,'needs_inspection');
+  assert.equal(state.inspection.code,'payout_confirm_timeout');
+  assert.deepEqual([state.steps.payout.phase,state.steps.payout.state,state.steps.payout.tx_hash],['error','submitted','cd'.repeat(32)]);
+  // Rerun: no resubmit, no further confirmation.
+  await runCase(caseId,deps(store,m,{awaitIntake:fakeIntake('confirmed').awaitIntake}));
+  assert.equal(m.calls.payouts.length,1);
+  assert.equal(m.calls.confirms.length,1);
  });
 });

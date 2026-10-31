@@ -10,12 +10,18 @@
 //  - a failed or interrupted Sokosumi create is resolved by a read-only `tasks list` check: one match is adopted,
 //    provably none allows a new create (max 3 attempts), anything else stops for inspection.
 // Payments go through payOnce, whose own journal makes a resumed call return the earlier result.
+// Early start: the intake gate accepts a verified and submitted customer tx (intake.state 'submitted'). The initial check
+// and task creation run at once, but no money moves before the intake is confirmed: payInvestigators and payout first
+// await deps.awaitIntake(caseId) → 'confirmed' | 'failed' (case failed, intake_not_confirmed) | 'timeout' (inspection,
+// intake_unconfirmed). A high case moves no money and completes without waiting; its intake is settled in the background.
+// Async payout: the case completes once the payout tx is submitted (payout.phase/state 'submitted'); confirmation runs
+// afterwards via deps.confirmPayout and sets payout.state 'confirmed' (or stops for inspection). Never resubmits.
 import {mkdirSync} from 'node:fs';
 import {readPayJournal,payJournalPath} from '../x402/pay.mjs';
 import {INVESTIGATOR_ROLES,investigatorPayPath,investigatorTaskId} from '../investigator/contract.mjs';
 import {roleToAgent} from '../agents/report-schema.mjs';
 import {validateReport} from '../client.mjs';
-import {TERMINAL_STATUSES} from './case-store.mjs';
+import {TERMINAL_STATUSES,intakeState,intakeAwaiting,payoutAwaiting} from './case-store.mjs';
 import {decide,decisionRequest} from './decide.mjs';
 import {buildRoleInputs} from './inputs.mjs';
 import {extractInvoiceFields} from './xml.mjs';
@@ -164,6 +170,68 @@ async function createTasks(ctx,result){
  }
 }
 
+// HARD RULE: called before any money moves for this case. Returns only when the customer's intake tx is confirmed.
+async function ensureIntakeConfirmed(ctx){
+ const {caseId,deps}=ctx;
+ const current=intakeState(ctx.state);
+ if(current==='confirmed')return;
+ if(current==='failed')throw new CaseFailed('intake_not_confirmed','The intake payment failed on chain. No money was moved for this case.');
+ if(current!=='submitted')throw new CaseStop('intake_unconfirmed',`The intake has no known state (${current}). No money was moved.`);
+ const outcome=await settleIntake(ctx);
+ if(outcome==='confirmed')return;
+ if(outcome==='failed')throw new CaseFailed('intake_not_confirmed','The intake payment failed on chain. No money was moved for this case.');
+ deps.log?.(`case=${caseId} event=intake_unconfirmed`);
+ throw new CaseStop('intake_unconfirmed','The intake payment was not confirmed in time. No money was moved; inspect the intake tx before any retry.');
+}
+
+// Waits for the intake tx and journals the outcome. Never throws: an error counts as a timeout.
+async function settleIntake(ctx){
+ const {caseId,deps,save}=ctx;
+ let outcome,error=null;
+ try{
+  if(typeof deps.awaitIntake!=='function')throw new Error('No intake confirmation is wired (deps.awaitIntake).');
+  outcome=await deps.awaitIntake(caseId);
+ }catch(caught){error=caught;outcome='timeout';}
+ const at=iso(deps.clock.now());
+ if(outcome==='confirmed')save(state=>{state.intake.state='confirmed';state.intake.confirmed_at=at;});
+ else if(outcome==='failed')save(state=>{state.intake.state='failed';state.intake.failed_at=at;});
+ else{
+  outcome='timeout';
+  save(state=>{state.intake.timed_out_at=at;if(error)state.intake.wait_error=clip(error?.message,300);});
+ }
+ deps.log?.(`case=${caseId} event=intake_${outcome}${ctx.state.intake.tx_hash?` tx_hash=${ctx.state.intake.tx_hash}`:''}`);
+ return outcome;
+}
+
+// Background payout confirmation for a completed case with payout.phase 'submitted'. Never throws, never resubmits:
+// a failure keeps the journaled tx and stops the case for inspection (the fail-closed rules of payout/transfer.mjs).
+async function confirmPayoutStep(ctx){
+ const {caseId,deps,save}=ctx;
+ const step=ctx.state.steps.payout;
+ try{
+  if(typeof deps.confirmPayout!=='function')throw Object.assign(new Error('No payout confirmation is wired (deps.confirmPayout).'),{code:'confirm_unavailable'});
+  const result=await deps.confirmPayout({payoutId:step.payout_id,txHash:step.tx_hash,checkId:ctx.state.check?.check_id??null});
+  if(result?.state!=='confirmed')throw Object.assign(new Error(`Payout confirmation returned state ${result?.state}.`),{code:'invalid_response'});
+  save(state=>{Object.assign(state.steps.payout,{phase:'done',state:'confirmed',confirmed_at:iso(deps.clock.now()),at:iso(deps.clock.now())});});
+  deps.log?.(`case=${caseId} event=payout_confirmed tx_hash=${step.tx_hash}`);
+ }catch(error){
+  const code=error?.code??'payout_error';
+  save(state=>{
+   Object.assign(state.steps.payout,{phase:'error',state:error?.state??state.steps.payout.state??'unknown',code,at:iso(deps.clock.now())});
+   state.status='needs_inspection';state.inspection={code:`payout_${code}`,message:clip(error?.message,2000)};
+  });
+  deps.log?.(`case=${caseId} event=needs_inspection code=payout_${code}`);
+ }
+}
+
+// Work that remains after a case reached a terminal status: payout confirmation, intake settlement (high/failed cases).
+async function followUps(ctx){
+ try{
+  if(payoutAwaiting(ctx.state))await confirmPayoutStep(ctx);
+  if(intakeAwaiting(ctx.state))await settleIntake(ctx);
+ }catch(error){ctx.deps.log?.(`case=${ctx.caseId} event=follow_up_error error=${clip(error?.message,200)}`);}
+}
+
 async function payInvestigators(ctx){
  const {caseId,deps,save}=ctx;
  const inv=()=>ctx.state.steps.investigation;
@@ -306,13 +374,13 @@ async function payout(ctx,checkId){
  const {caseId,deps,save}=ctx;
  const step=ctx.state.steps.payout;
  if(step?.phase==='done'||step?.phase==='refused'){save(state=>{state.status='completed';});return;}
+ if(step?.phase==='submitted'){save(state=>{state.status='completed';});await confirmPayoutStep(ctx);return;}
  if(step)throw new CaseStop('payout_unknown',`A payout for ${checkId} may have started (journal phase ${step.phase}). Inspect it with payout/transfer.mjs; it is never restarted automatically.`);
+ await ensureIntakeConfirmed(ctx);
  save(state=>{state.status='payout';state.steps.payout={phase:'started',at:iso(deps.clock.now())};});
- try{
-  const result=await deps.runPayout({checkId});
-  save(state=>{state.steps.payout={phase:'done',state:result.state,payout_id:result.payoutId,tx_hash:result.txHash??null,at:iso(deps.clock.now())};state.status='completed';});
-  deps.log?.(`case=${caseId} event=payout state=${result.state} tx_hash=${result.txHash}`);
- }catch(error){
+ let result;
+ try{result=await deps.runPayout({checkId});}
+ catch(error){
   if(!error?.payoutId&&error?.status===409){
    // The Rust policy engine refused to authorize (spec §12): no intent, nothing signed.
    save(state=>{state.steps.payout={phase:'refused',code:error.code??'refused',at:iso(deps.clock.now())};state.status='completed';});
@@ -322,35 +390,48 @@ async function payout(ctx,checkId){
   save(state=>{state.steps.payout={phase:'error',code:error?.code??'payout_error',payout_id:error?.payoutId??null,tx_hash:error?.txHash??null,at:iso(deps.clock.now())};});
   throw new CaseStop(`payout_${error?.code??'error'}`,clip(error?.message,2000));
  }
+ if(result?.state==='submitted'){
+  // Broadcast and recorded by the backend (/submitted): the case is complete; confirmation follows in the background.
+  save(state=>{state.steps.payout={phase:'submitted',state:'submitted',payout_id:result.payoutId,tx_hash:result.txHash??null,submitted_at:iso(deps.clock.now()),at:iso(deps.clock.now())};state.status='completed';});
+  deps.log?.(`case=${caseId} event=payout state=submitted tx_hash=${result.txHash}`);
+  await confirmPayoutStep(ctx);
+  return;
+ }
+ save(state=>{state.steps.payout={phase:'done',state:result.state,payout_id:result.payoutId,tx_hash:result.txHash??null,at:iso(deps.clock.now())};state.status='completed';});
+ deps.log?.(`case=${caseId} event=payout state=${result.state} tx_hash=${result.txHash}`);
 }
 
 /**
  * Runs or resumes one case until it is completed, failed or needs inspection. Never throws for case errors.
  * @param {string} caseId
- * @param {object} deps {config, store, backend, sokosumi, payOnce, payer, answerReport, validateReport, runPayout, clock, log, customerTexts}
+ * @param {object} deps {config, store, backend, sokosumi, payOnce, payer, answerReport, validateReport, runPayout, confirmPayout,
+ *   awaitIntake, clock, log, customerTexts}. awaitIntake(caseId) → 'confirmed'|'failed'|'timeout'; confirmPayout({payoutId,txHash}).
  */
 export async function runCase(caseId,deps){
  deps={...deps,clock:deps.clock??systemClock,validateReport:deps.validateReport??validateReport};
  let state=deps.store.read(caseId);
  if(!state)throw new Error(`Unknown case ${caseId}`);
- if(TERMINAL_STATUSES.has(state.status))return state;
  const ctx={caseId,deps,get state(){return state;}};
  ctx.save=mutate=>{mutate(state);state.updated_at=iso(deps.clock.now());deps.store.write(state);return state;};
+ if(TERMINAL_STATUSES.has(state.status)){await followUps(ctx);return state;}
  try{
   const result=await initialCheck(ctx);
   const band=result.summary.band;
   if(band==='high'){
    ctx.save(s=>{s.outcome={decision:'DONT_PAY',final_decision:'rejected',reason_type:result.summary.reason_type??null,block_wallet:false,
     decline_reasons:result.summary.decline_reasons??[],decided_by:'initial_check'};s.status='completed';});
+   await followUps(ctx); // no money moves: the case is already complete, the intake is settled in the background
    return state;
   }
   if(band==='low'){
+   await ensureIntakeConfirmed(ctx);
    ctx.save(s=>{s.outcome={decision:'PAY',final_decision:'approved',reason_type:null,block_wallet:false,decline_reasons:[],decided_by:'initial_check'};});
    await payout(ctx,result.check_id);
    return state;
   }
   if(!state.steps.investigation)ctx.save(s=>{s.status='investigating';s.steps.investigation={tasks:{},payments:{},reports:{}};});
   await createTasks(ctx,result);
+  await ensureIntakeConfirmed(ctx);
   await payInvestigators(ctx);
   await collectReports(ctx);
   const reports=state.steps.investigation.reports;
@@ -366,6 +447,7 @@ export async function runCase(caseId,deps){
   const code=error instanceof CaseStop||failed?error.code:'internal_error';
   ctx.save(s=>{s.status=failed?'failed':'needs_inspection';s.inspection={code,message:clip(error?.message,2000)};});
   deps.log?.(`case=${caseId} event=${failed?'failed':'needs_inspection'} code=${code}`);
+  if(failed)await followUps(ctx); // e.g. a refused initial check: settle the intake state in the background
   return state;
  }
 }
@@ -380,6 +462,7 @@ export function caseView(state){
   created_at:state.created_at,
   updated_at:state.updated_at,
   check_id:state.check?.check_id??null,
+  intake:state.intake?{state:intakeState(state),tx_hash:state.intake.tx_hash??null,paid_at:state.intake.paid_at??null,confirmed_at:state.intake.confirmed_at??null}:null,
   band:state.check?.band??null,
   risk_score:state.check?.risk_score??null,
   investigators:inv?Object.fromEntries(INVESTIGATOR_ROLES.map(role=>[role,{

@@ -81,11 +81,34 @@ export function tempStore(){
  return {dir,store:createCaseStore(dir),cleanup:()=>rmSync(dir,{recursive:true,force:true})};
 }
 
-/** Creates a fresh accepted case for F9 and returns its ID. */
-export function seedCase(store,xml=F9_XML){
+/** Creates a fresh accepted case for F9 and returns its ID. intake: extra intake fields, e.g. {state:'submitted'}. */
+export function seedCase(store,xml=F9_XML,intake={}){
  const {caseId,resourceId,xmlSha256}=intakeIds(xml);
- store.create({caseId,xml,intake:{resource_id:resourceId,xml_sha256:xmlSha256,tx_hash:'ab'.repeat(32)},now:new Date('2026-10-31T10:00:00Z')});
+ store.create({caseId,xml,intake:{resource_id:resourceId,xml_sha256:xmlSha256,tx_hash:'ab'.repeat(32),...intake},now:new Date('2026-10-31T10:00:00Z')});
  return caseId;
+}
+
+/** Controllable deps.awaitIntake: every call waits until resolve(outcome) (or a preset outcome). */
+export function fakeIntake(preset){
+ const intake={calls:[],waiting:0,resolve:null};
+ let release;
+ const settled=new Promise(resolve=>{release=resolve;});
+ intake.resolve=outcome=>release(outcome);
+ if(preset!==undefined)release(preset);
+ intake.awaitIntake=async caseId=>{intake.calls.push(caseId);intake.waiting+=1;try{return await settled;}finally{intake.waiting-=1;}};
+ return intake;
+}
+
+/** Fake intake gate (acceptOn 'submitted'): records calls; paymentStatus/waitConfirmed like x402/gate.mjs. */
+export function fakeGate({confirmed=false,status='submitted',wait=async()=>'confirmed',block}={}){
+ const calls={gate:0,wait:[],status:[]};
+ const gate=async req=>{
+  calls.gate+=1;
+  if(block)await block;
+  const txHash=req.snifferResourceId.slice(4,68);
+  return {paid:true,txHash,resourceId:req.snifferResourceId,confirmed};
+ };
+ return Object.assign(gate,{calls,paymentStatus:txHash=>{calls.status.push(txHash);return status;},waitConfirmed:async(txHash,options)=>{calls.wait.push([txHash,options]);return wait(txHash,options);}});
 }
 
 /**
@@ -94,8 +117,9 @@ export function seedCase(store,xml=F9_XML){
  */
 // createPlan: role → per-attempt behaviour: 'ok' (default), 'fail_after' (task is created, then the CLI call fails),
 // 'fail_before' (CLI fails, nothing created). list: optional override (args, allTasks) → CLI output, or throws.
-export function mocks({band='medium',result=checkResult(band),reports={},llm='PAY',payFails={},payout,createPlan={},list}={}){
- const calls={initialCheck:0,getXml:0,history:0,decisions:[],getCheck:0,creates:[],createAttempts:[],lists:[],gets:0,payments:[],llm:0,payouts:[]};
+// confirm: deps.confirmPayout behaviour ({payoutId,txHash}) → result; default confirms at once.
+export function mocks({band='medium',result=checkResult(band),reports={},llm='PAY',payFails={},payout,confirm,createPlan={},list}={}){
+ const calls={initialCheck:0,getXml:0,history:0,decisions:[],getCheck:0,creates:[],createAttempts:[],lists:[],gets:0,payments:[],llm:0,payouts:[],confirms:[]};
  let nextTask=1;
  const tasks=new Map();
  const backend={
@@ -157,5 +181,7 @@ export function mocks({band='medium',result=checkResult(band),reports={},llm='PA
   return mainReport(input.case_id,llm);
  };
  const runPayout=payout??(async()=>({payoutId:'pay_01JBX7ZQ8V3K6M2N4P5R7S9T0X',state:'confirmed',txHash:'cd'.repeat(32),resumed:false}));
- return {calls,tasks,backend,sokosumi,payOnce,answerReport,runPayout:async args=>{calls.payouts.push(args.checkId);return runPayout(args);}};
+ const confirmPayout=confirm??(async({payoutId,txHash})=>({payoutId,state:'confirmed',txHash,resumed:true}));
+ return {calls,tasks,backend,sokosumi,payOnce,answerReport,runPayout:async args=>{calls.payouts.push(args.checkId);return runPayout(args);},
+  confirmPayout:async args=>{calls.confirms.push(args);return confirmPayout(args);}};
 }
