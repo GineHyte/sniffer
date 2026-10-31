@@ -316,7 +316,8 @@ fn spec_test_10_f10() {
     assert_eq!(reducers_fired(&c), [("T-1", -15), ("T-4", -5)]);
 }
 
-/// Test 11: F11 → S-8 5 + S-9 5 + W-4 10 + I-2 20 + I-8 8 + I-10 5 = 53; T-4 −5.
+/// Test 11: F11 → S-8 5 + S-9 5 + W-4 10 + I-8 8 + I-10 5 = 33; T-4 −5.
+/// I-2 stays silent: the shipped new-wallet limit equals `max_invoice_eur` (10000).
 #[test]
 fn spec_test_11_f11() {
     let s = seed();
@@ -325,21 +326,10 @@ fn spec_test_11_f11() {
     let fired = criteria_fired(&c);
     assert_eq!(
         fired,
-        [
-            ("S-8", 5),
-            ("S-9", 5),
-            ("W-4", 10),
-            ("I-2", 20),
-            ("I-8", 8),
-            ("I-10", 5)
-        ]
+        [("S-8", 5), ("S-9", 5), ("W-4", 10), ("I-8", 8), ("I-10", 5)]
     );
-    assert_eq!(sum(&fired), 53);
+    assert_eq!(sum(&fired), 33);
     assert_eq!(evidence(&c, "S-8"), "free-mail domain in BT-43");
-    assert_eq!(
-        evidence(&c, "I-2"),
-        "amount 2000.00 EUR > limit 1000.00 EUR (wallet trust 0.000)"
-    );
     assert_eq!(
         evidence(&c, "I-10"),
         "amount 2000.00 EUR is a multiple of 100.00 EUR"
@@ -385,7 +375,7 @@ fn spec_test_15_pressure_words() {
 }
 
 /// Test 16 (FR-21): mangled address M has W1's stake part but W3's payment
-/// credential → new wallet: S-3 25 + W-4 10 + I-2 20 = 55.
+/// credential → new wallet: S-3 25 + W-4 10 = 35 (no I-2: new-wallet limit equals the max).
 #[test]
 fn spec_test_16_mangled_address() {
     let s = seed();
@@ -395,8 +385,8 @@ fn spec_test_16_mangled_address() {
     let c = scenario(&inv, &s);
     assert_eq!(c.wallet, None);
     let fired = criteria_fired(&c);
-    assert_eq!(fired, [("S-3", 25), ("W-4", 10), ("I-2", 20)]);
-    assert_eq!(sum(&fired), 55);
+    assert_eq!(fired, [("S-3", 25), ("W-4", 10)]);
+    assert_eq!(sum(&fired), 35);
     assert_eq!(reducers_fired(&c), [("T-3", -10), ("T-4", -5)]);
 }
 

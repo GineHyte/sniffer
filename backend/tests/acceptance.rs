@@ -349,17 +349,10 @@ async fn test11_f11_medium_with_t4() {
     assert_eq!(band(&r), "medium", "{r}");
     assert_eq!(
         criteria(&r),
-        ids(&[
-            ("I-2", 20),
-            ("W-4", 10),
-            ("I-8", 8),
-            ("S-8", 5),
-            ("S-9", 5),
-            ("I-10", 5)
-        ])
+        ids(&[("W-4", 10), ("I-8", 8), ("S-8", 5), ("S-9", 5), ("I-10", 5)])
     );
     assert_eq!(reducers(&r), ids(&[("T-4", -5)]));
-    assert_eq!(score(&r), 48);
+    assert_eq!(score(&r), 28);
 }
 
 #[tokio::test]
@@ -458,9 +451,9 @@ async fn test16_mangled_address() {
     let Some(h) = harness().await else { return };
     let r = h.check_ok(&with_address(&f1(), M)).await;
     assert_eq!(band(&r), "medium", "{r}");
-    assert_eq!(criteria(&r), ids(&[("S-3", 25), ("I-2", 20), ("W-4", 10)]));
+    assert_eq!(criteria(&r), ids(&[("S-3", 25), ("W-4", 10)]));
     assert!(r["reducers"].as_array().unwrap().is_empty());
-    assert_eq!(score(&r), 55);
+    assert_eq!(score(&r), 35);
     assert_eq!(r["wallet"]["wallet_hash"], wallet_hash(W3));
     assert_eq!(r["wallet"]["known"], false);
 }

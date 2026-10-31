@@ -356,6 +356,14 @@ mod tests {
 
     #[test]
     fn i2_new_wallet_limit() {
+        // The shipped config sets the new-wallet limit equal to the max, so test the rule with a lower limit.
+        let mut params = CRITERIA.params.clone();
+        params.new_wallet_limit_eur = d("1000.00");
+        let ctx = || {
+            let mut c = ctx();
+            c.params = &params;
+            c
+        };
         let mut inv = f1();
         inv.grand_total = Some(d("2000.00"));
         let c = ctx().with_invoice(&inv);

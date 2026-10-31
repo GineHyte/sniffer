@@ -942,7 +942,7 @@ Alle Punkte, Schwellen und Texte. Die Reihenfolge von `criteria` ist die Katalog
   "reducer_cap": 25,
   "reducers_blocked_by_points": 25,
   "params": {
-    "new_wallet_limit_eur": "1000.00",
+    "new_wallet_limit_eur": "10000.00",
     "max_invoice_eur": "10000.00",
     "round_amount_multiple_eur": "100.00",
     "approval_thresholds_eur": ["1000.00", "5000.00", "10000.00"],

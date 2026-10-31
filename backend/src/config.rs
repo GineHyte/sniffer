@@ -1270,7 +1270,7 @@ mod tests {
             (100, 25, 25)
         );
         let d = |s: &str| Decimal::from_str(s).unwrap();
-        assert_eq!(c.params.new_wallet_limit_eur, d("1000.00"));
+        assert_eq!(c.params.new_wallet_limit_eur, d("10000.00"));
         assert_eq!(c.params.max_invoice_eur, d("10000.00"));
         assert_eq!(c.params.round_amount_multiple_eur, d("100.00"));
         assert_eq!(
