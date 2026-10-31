@@ -371,9 +371,16 @@ pub async fn import_from_reader<R: BufRead>(
     apply(pool, &parsed, min_entries).await
 }
 
+/// `User-Agent` of the SDN download. reqwest sends none by default, and the OFAC
+/// load balancer answers requests without one with HTTP 403.
+const USER_AGENT: &str = concat!("sniffer/", env!("CARGO_PKG_VERSION"), " (OFAC SDN import)");
+
 /// Downloads `url` (redirects followed) with `http_timeout`, at most [`MAX_DOWNLOAD_BYTES`].
 async fn download(url: &str, http_timeout: Duration) -> anyhow::Result<Vec<u8>> {
-    let client = reqwest::Client::builder().timeout(http_timeout).build()?;
+    let client = reqwest::Client::builder()
+        .user_agent(USER_AGENT)
+        .timeout(http_timeout)
+        .build()?;
     let mut resp = client
         .get(url)
         .send()
@@ -565,5 +572,31 @@ mod tests {
             .unwrap();
         let e = apply(&pool, &parsed(), MIN_ENTRIES).await.unwrap_err();
         assert!(e.to_string().contains("plausibility"), "{e}");
+    }
+
+    #[tokio::test]
+    async fn download_sends_user_agent_and_follows_redirect() {
+        // Regression: the OFAC load balancer answers requests without a User-Agent with
+        // HTTP 403, and reqwest sends none by default. Unmatched requests get wiremock's 404.
+        use wiremock::matchers::{header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/exports/SDN.XML"))
+            .and(header("user-agent", USER_AGENT))
+            .respond_with(
+                ResponseTemplate::new(302)
+                    .insert_header("location", format!("{}/s3/sdn.xml", server.uri())),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/s3/sdn.xml"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("<sdnList/>"))
+            .mount(&server)
+            .await;
+        let url = format!("{}/exports/SDN.XML", server.uri());
+        let body = download(&url, Duration::from_secs(5)).await.unwrap();
+        assert_eq!(body, b"<sdnList/>");
     }
 }
