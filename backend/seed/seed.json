@@ -1,0 +1,40 @@
+{
+  "invoices": [
+    { "seller_vat_id": "DE111111111", "seller_name": "Alpha Consulting GmbH", "seller_email": "rechnung@alpha-consulting.example",
+      "seller_phone": "+49 89 1234567", "seller_street": "Musterstraße 1", "seller_postcode": "80333", "seller_city": "München",
+      "seller_country": "DE", "wallet_address": "addr_test1qqg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyd24242424242424242424242424242424242424242424qmz2e4c",
+      "invoice_number": "RE-2026-0101", "amount": "1190.00", "currency": "EUR",
+      "issue_date": "2026-04-15", "type_code": "380", "final_decision": "approved", "final_reason_type": null },
+    { "seller_vat_id": "DE111111111", "seller_name": "Alpha Consulting GmbH", "seller_email": "rechnung@alpha-consulting.example",
+      "seller_phone": "+49 89 1234567", "seller_street": "Musterstraße 1", "seller_postcode": "80333", "seller_city": "München",
+      "seller_country": "DE", "wallet_address": "addr_test1qqg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyd24242424242424242424242424242424242424242424qmz2e4c",
+      "invoice_number": "RE-2026-0102", "amount": "1250.00", "currency": "EUR",
+      "issue_date": "2026-05-15", "type_code": "380", "final_decision": "approved", "final_reason_type": null },
+    { "seller_vat_id": "DE111111111", "seller_name": "Alpha Consulting GmbH", "seller_email": "rechnung@alpha-consulting.example",
+      "seller_phone": "+49 89 1234567", "seller_street": "Musterstraße 1", "seller_postcode": "80333", "seller_city": "München",
+      "seller_country": "DE", "wallet_address": "addr_test1qqg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyd24242424242424242424242424242424242424242424qmz2e4c",
+      "invoice_number": "RE-2026-0103", "amount": "980.00", "currency": "EUR",
+      "issue_date": "2026-06-15", "type_code": "380", "final_decision": "approved", "final_reason_type": null },
+    { "seller_vat_id": "DE111111111", "seller_name": "Alpha Consulting GmbH", "seller_email": "rechnung@alpha-consulting.example",
+      "seller_phone": "+49 89 1234567", "seller_street": "Musterstraße 1", "seller_postcode": "80333", "seller_city": "München",
+      "seller_country": "DE", "wallet_address": "addr_test1qqg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyd24242424242424242424242424242424242424242424qmz2e4c",
+      "invoice_number": "RE-2026-0104", "amount": "1100.00", "currency": "EUR",
+      "issue_date": "2026-07-15", "type_code": "380", "final_decision": "approved", "final_reason_type": null },
+    { "seller_vat_id": "DE111111111", "seller_name": "Alpha Consulting GmbH", "seller_email": "rechnung@alpha-consulting.example",
+      "seller_phone": "+49 89 1234567", "seller_street": "Musterstraße 1", "seller_postcode": "80333", "seller_city": "München",
+      "seller_country": "DE", "wallet_address": "addr_test1qqg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyd24242424242424242424242424242424242424242424qmz2e4c",
+      "invoice_number": "RE-2026-0105", "amount": "1300.00", "currency": "EUR",
+      "issue_date": "2026-08-15", "type_code": "380", "final_decision": "approved", "final_reason_type": null },
+    { "seller_vat_id": "DE111111111", "seller_name": "Alpha Consulting GmbH", "seller_email": "rechnung@alpha-consulting.example",
+      "seller_phone": "+49 89 1234567", "seller_street": "Musterstraße 1", "seller_postcode": "80333", "seller_city": "München",
+      "seller_country": "DE", "wallet_address": "addr_test1qqg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyd24242424242424242424242424242424242424242424qmz2e4c",
+      "invoice_number": "RE-2026-0106", "amount": "1050.00", "currency": "EUR",
+      "issue_date": "2026-09-15", "type_code": "380", "final_decision": "approved", "final_reason_type": null }
+  ],
+  "blocklist": [
+    { "type": "wallet", "value": "addr_test1vpzyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3q5drxww", "source": "internal", "reason": "TEST_INTERNAL" },
+    { "type": "wallet", "value": "addr_test1vp24242424242424242424242424242424242424242424glts28l", "source": "OFAC", "reason": "TEST_OFAC" }
+  ],
+  "sanction_names": [ { "name": "Delta Trading LLC", "sdn_uid": "TEST-1" } ],
+  "ofac_list_fresh": true
+}

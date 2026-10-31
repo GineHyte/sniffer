@@ -37,17 +37,26 @@ services:
       retries: 10
       start_period: 5s
 
-  # sniffer: added in Task 18 (backend/Dockerfile).
-  # sniffer:
-  #   build: ./backend
-  #   env_file: .env
-  #   ports:
-  #     - "127.0.0.1:8080:8080"
-  #   depends_on:
-  #     postgres:
-  #       condition: service_healthy
-  #     redis:
-  #       condition: service_healthy
+  # Task 18 (backend/Dockerfile). Reads the rest of its config (SNIFFER_API_TOKEN,
+  # SNIFFER_HMAC_KEY, BLOCKFROST_*, ...) from .env; DATABASE_URL and REDIS_URL are
+  # overridden to the compose service names because .env points at 127.0.0.1 for host
+  # use. POSTGRES_PASSWORD must be URL-safe (openssl rand -hex 24).
+  sniffer:
+    build: ./backend
+    image: sniffer:dev
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-sniffer}:${POSTGRES_PASSWORD:?set in .env}@postgres:5432/${POSTGRES_DB:-sniffer}
+      REDIS_URL: redis://redis:6379/0
+      SNIFFER_BIND_ADDR: 0.0.0.0:8080
+    ports:
+      - "127.0.0.1:8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
 
 volumes:
   postgres-data:
