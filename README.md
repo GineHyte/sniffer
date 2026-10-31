@@ -45,6 +45,32 @@ Two stages: a cheap software check runs on every invoice, and the expensive AI a
 
 Measured on Preprod: a low-risk case reports "approved, payout submitted" about 12 s after the intake payment. A medium-risk case reaches its decision in about 3 min (three paid investigators). Details are in `docs/plans/PROGRESS.md`.
 
+## Architecture
+
+Who talks to whom, and where test ADA moves. All services run on one machine and listen on `127.0.0.1`.
+
+```mermaid
+flowchart LR
+  user([Customer browser]) --> ui["Upload UI<br/>Next.js :3000"]
+  ui -->|"/api/*"| gw["Customer gateway<br/>:21952"]
+  gw -->|"x402 · 1 tADA intake"| main["Main API<br/>:21951"]
+  main -->|"initial check · decision · payout ledger"| be["Rust backend :8080<br/>Postgres · Redis"]
+  be -.-> ext[("VIES · Blockfrost<br/>Chainabuse · OFAC")]
+  main -->|"create task · read report"| soko[(Sokosumi)]
+  main -->|"x402 · 1 tADA per investigator"| inv["Investigator APIs ×3<br/>:21961–21963"]
+  inv -.->|"payment journal"| w["Workers ×3"]
+  soko -->|"paid task"| w
+  w --> eve["Eve runtimes ×3<br/>:21971–21973"]
+  main --> evem["Eve main<br/>:21974"]
+  eve --> claude([Claude API])
+  evem --> claude
+  main -->|"ADA payout to supplier"| chain[(Cardano Preprod)]
+```
+
+- **Money:** the customer pays Main (intake); for a medium case Main pays each investigator; for an approved case the payout wallet pays the supplier. Every payment is journaled before signing.
+- **Reports:** a worker starts a Sokosumi task only after its investigator API saw the payment, asks its Eve runtime (Claude) for a report and completes the task. Main reads the three reports from Sokosumi and asks Eve main for the decision.
+- **State:** the backend keeps checks, invoices, supplier/wallet history and the payout ledger in Postgres. Main, the gateway and the investigators keep their case files and payment journals in `.local/`.
+
 ## Components
 
 | Path | What it is | Default address |
@@ -55,9 +81,9 @@ Measured on Preprod: a low-risk case reports "approved, payout submitted" about 
 | `agent/`, `promts/` | Eve agent definition (Claude via `@ai-sdk/anthropic`) and the four role prompts | |
 | `x402/` | x402 gate, idempotent payer, in-process facilitator, wallet CLI | |
 | `payout/` | Supplier payout transfer (Evolution SDK) | |
-| `scripts/` | `preflight` (read-only health check) and `demo` (test customer) | |
+| `scripts/` | `preflight` (read-only health check), `demo` (test customer), `sokosumi-login-win.mjs` (Windows login fix) | |
 | `customer/` | Customer gateway for the upload frontend: pays the intake from the demo wallet, joins case view and fired criteria | `127.0.0.1:21952` |
-| `frontend/` | Next.js upload UI (multi-file queue, live case progress, criteria with evidence) | `localhost:3000` |
+| `frontend/` | Next.js upload UI (multi-file queue, live case progress, criteria with evidence), `/criteria` (all check criteria, read from `backend/config/criteria.json`), `/docs` (Swagger UI) | `127.0.0.1:3000` |
 | `docs/` | Spec (`initial-check-spec.md`, German), plan and progress journal, x402 notes, OpenAPI specs, fixtures | |
 
 API reference: `docs/openapi/` has OpenAPI 3.1 specs for the Main API, the backend, the investigator API and the customer gateway.
@@ -167,7 +193,8 @@ npm run main -- --confirm-live-payments              # pays with real Preprod tA
 Restart rules:
 - after backend code or `backend/data/*` changes: `npm run stack`;
 - after prompt changes in `promts/`: the Eve runtimes, which copy the prompts on start;
-- after changes in `main/`, `x402/` or `payout/`: Main and the investigator APIs.
+- after changes in `main/`, `x402/` or `payout/`: Main and the investigator APIs;
+- after changes in `frontend/` when running the production build: `npm run build`, then restart `npm start`.
 
 ### 6. Check and run a test case
 
