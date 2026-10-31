@@ -6,6 +6,7 @@ import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {parseArgs,assertConfirmed,prepareXml,duePayableCents,payoutLovelace,caseIdFromJournal,pollCase,progressLine,payKeyFor,
+ follow,formatElapsed,trackMilestones,timingLines,failureMessage,intakeRefusal,payoutUnconfirmed,DEFAULT_CONFIRM_WAIT_MS,
  normalizeVat,supplierHash,sellerVat,validMockVats,openOrderFor,supplierRewrite,pickFreshSupplier,resolveSupplier,expectedOutcome,supplierLines,
  supplierLookups,readRepoJson,VIES_MOCK_FILE,OPEN_ORDERS_FILE,CONFIRM_FLAG,DEFAULT_FIXTURE,DEFAULT_TIMEOUT_MS,DEFAULT_POLL_MS} from './demo-case.mjs';
 import {intakeIds} from '../main/case-store.mjs';
@@ -19,12 +20,14 @@ const ADDR='addr_test1qqsukwn3txs33kx4qh97g5suejsc6w78x994j7y6sefsk29vnt2urqy4t5
 test('parseArgs: defaults, every option, and invalid input',()=>{
  const defaults=parseArgs([]);
  assert.deepEqual(defaults,{confirm:false,help:false,fixture:DEFAULT_FIXTURE,invoiceNumber:null,recipientWallet:null,wallet:'payer',
-  mainUrl:'http://127.0.0.1:21951',timeoutMs:DEFAULT_TIMEOUT_MS,pollMs:DEFAULT_POLL_MS,caseId:null,newSupplier:false,supplierVat:null,supplierName:null});
+  mainUrl:'http://127.0.0.1:21951',timeoutMs:DEFAULT_TIMEOUT_MS,pollMs:DEFAULT_POLL_MS,caseId:null,newSupplier:false,supplierVat:null,supplierName:null,waitConfirm:true});
+ assert.equal(DEFAULT_POLL_MS,2000);
+ assert.equal(parseArgs(['--no-wait-confirm']).waitConfirm,false);
  assert.equal(parseArgs([],{MAIN_PORT:'22000'}).mainUrl,'http://127.0.0.1:22000');
  const all=parseArgs([CONFIRM_FLAG,'--fixture','docs/fixtures/f11.xml','--invoice-number','RE-2026-0413','--recipient-wallet','payee','--wallet','payer2',
   '--main-url','http://localhost:1234/','--timeout-ms','60000','--poll-ms','500','--case',CASE,'--supplier-vat','DE222222222','--supplier-name','Müller & Söhne GmbH']);
  assert.deepEqual(all,{confirm:true,help:false,fixture:'docs/fixtures/f11.xml',invoiceNumber:'RE-2026-0413',recipientWallet:'payee',wallet:'payer2',
-  mainUrl:'http://localhost:1234',timeoutMs:60000,pollMs:500,caseId:CASE,newSupplier:false,supplierVat:'DE222222222',supplierName:'Müller & Söhne GmbH'});
+  mainUrl:'http://localhost:1234',timeoutMs:60000,pollMs:500,caseId:CASE,newSupplier:false,supplierVat:'DE222222222',supplierName:'Müller & Söhne GmbH',waitConfirm:true});
  assert.equal(parseArgs(['--new-supplier','--supplier-name','Beta GmbH']).newSupplier,true);
  assert.equal(parseArgs(['-h']).help,true);
  for(const [argv,reason] of [[['--bogus'],/Unknown argument/],[['--fixture'],/needs a value/],[['--fixture','--poll-ms'],/needs a value/],
@@ -99,7 +102,7 @@ test('pollCase stops at the first terminal status and reports every view',async(
  const clock=fakeClock();
  const result=await pollCase({caseId:CASE,timeoutMs:600_000,pollMs:1000,clock,onUpdate:event=>seen.push(event.view?.status),
   fetchCase:async id=>{assert.equal(id,CASE);return {status:200,body:{case_id:id,status:statuses[calls++]}};}});
- assert.deepEqual(result,{done:true,view:{case_id:CASE,status:'completed'},timedOut:false});
+ assert.deepEqual(result,{done:true,view:{case_id:CASE,status:'completed'},timedOut:false,confirmTimedOut:false});
  assert.equal(calls,6);assert.equal(clock.t,5000);
  assert.deepEqual(seen,statuses.slice(0,6));
  for(const status of ['failed','needs_inspection']){
@@ -119,7 +122,129 @@ test('pollCase retries transient errors, times out at the deadline, and stops on
  await assert.rejects(pollCase({caseId:CASE,timeoutMs:1000,pollMs:10,clock:fakeClock(),fetchCase:async()=>({status:404,body:{error:'not_found'}})}),/not found/);
 });
 
+const TX='ab'.repeat(32);
+const view=(status,extra={})=>({case_id:CASE,status,intake:{tx_hash:TX,state:'submitted',paid_at:'2026-10-31T10:00:00.000Z',confirmed_at:null},decision:null,payout:null,inspection:null,...extra});
+const approved={decision:'PAY',final_decision:'approved',decided_by:'initial_check'};
+const intakeOk={tx_hash:TX,state:'confirmed',paid_at:'2026-10-31T10:00:00.000Z',confirmed_at:'2026-10-31T10:00:21.400Z'};
+const scripted=(views,clock,{each=()=>{}}={})=>{let i=0;return async()=>{each(clock.t);return {status:200,body:views[Math.min(i++,views.length-1)]};};};
+
+test('pollCase keeps polling a completed case until its submitted payout is confirmed',async()=>{
+ const clock=fakeClock();const seen=[];
+ const views=[view('initial_check'),view('payout',{intake:intakeOk,decision:approved,payout:{phase:'started',state:null}}),
+  view('completed',{intake:intakeOk,decision:approved,payout:{phase:'done',state:'submitted',tx_hash:TX}}),
+  view('completed',{intake:intakeOk,decision:approved,payout:{phase:'done',state:'submitted',tx_hash:TX}}),
+  view('completed',{intake:intakeOk,decision:approved,payout:{phase:'done',state:'confirmed',tx_hash:TX}})];
+ const result=await pollCase({caseId:CASE,timeoutMs:600_000,pollMs:2000,clock,fetchCase:scripted(views,clock),onUpdate:event=>seen.push(event.view.payout?.state??null)});
+ assert.deepEqual([result.done,result.timedOut,result.confirmTimedOut,result.view.payout.state],[true,false,false,'confirmed']);
+ assert.deepEqual(seen,[null,null,'submitted','submitted','confirmed']);
+ assert.equal(clock.t,8000);
+ // Without waitConfirm the first completed view ends the loop.
+ const quick=await pollCase({caseId:CASE,timeoutMs:600_000,pollMs:2000,clock:fakeClock(),fetchCase:scripted(views,fakeClock()),waitConfirm:false});
+ assert.equal(quick.view.payout.state,'submitted');assert.equal(quick.confirmTimedOut,false);
+ assert.ok(payoutUnconfirmed(quick.view));assert.ok(!payoutUnconfirmed(result.view));
+});
+
+test('pollCase bounds the confirmation wait separately from the case timeout',async()=>{
+ const clock=fakeClock();let calls=0;
+ const stuck=view('completed',{decision:approved,payout:{phase:'done',state:'submitted'}});
+ const result=await pollCase({caseId:CASE,timeoutMs:1000,pollMs:2000,clock,confirmWaitMs:5000,
+  fetchCase:async()=>{calls++;if(calls===2)return {status:503,body:null};return {status:200,body:stuck};}});
+ assert.deepEqual([result.done,result.timedOut,result.confirmTimedOut],[true,false,true]);
+ assert.equal(result.view,stuck);
+ assert.equal(clock.t,5000); // case timeout 1 s no longer applies once completed; never sleeps past the confirm deadline
+ assert.equal(calls,4);
+ assert.equal(DEFAULT_CONFIRM_WAIT_MS,180_000);
+});
+
+test('formatElapsed, milestones and the timing summary',()=>{
+ assert.deepEqual([0,1234,59_999,60_000,65_400,754_000,-5].map(formatElapsed),['0.0s','1.2s','59.9s','1m00s','1m05s','12m34s','0.0s']);
+ const marks={intakePaid:4100};
+ trackMilestones(marks,view('initial_check'),6000);
+ assert.deepEqual(marks,{intakePaid:4100});
+ trackMilestones(marks,view('deciding',{intake:intakeOk}),25_300);
+ trackMilestones(marks,view('completed',{intake:intakeOk,decision:approved,payout:{phase:'done',state:'submitted'}}),38_000);
+ trackMilestones(marks,view('completed',{intake:intakeOk,decision:approved,payout:{phase:'done',state:'confirmed'}}),62_500);
+ trackMilestones(marks,view('completed',{intake:intakeOk,decision:approved,payout:{phase:'done',state:'confirmed'}}),70_000);
+ assert.deepEqual(marks,{intakePaid:4100,intakeConfirmed:25_300,decision:38_000,payoutSubmitted:38_000,payoutConfirmed:62_500});
+ assert.deepEqual(timingLines(marks,view('completed',{intake:intakeOk})),[
+  'Timing (first seen by this run, since the demo started):',
+  '  intake paid (202 received)  +4.1s',
+  '  intake confirmed            +25.3s',
+  '  decision reached            +38.0s',
+  '  payout submitted            +38.0s',
+  '  payout confirmed            +1m02s',
+  '  intake paid -> confirmed (Main clock): 21.4s']);
+ // A confirmed payout seen first also marks it submitted; nothing seen, nothing printed.
+ assert.deepEqual(trackMilestones({},view('completed',{payout:{state:'confirmed'}}),9000),{payoutSubmitted:9000,payoutConfirmed:9000});
+ assert.deepEqual(timingLines({}),[]);
+ assert.deepEqual(timingLines({decision:1000},null),['Timing (first seen by this run, since the demo started):','  decision reached  +1.0s']);
+});
+
+const followRun=async(views,{options={},confirmWaitMs}={})=>{
+ const clock=fakeClock();const lines=[];const marks={intakePaid:4000}; // the demo started 5 s before polling, 202 after 4 s
+ const opts={mainUrl:'http://main',timeoutMs:600_000,pollMs:2000,waitConfirm:true,...options};
+ let result,error;
+ try{result=await follow(opts,CASE,{fetchCase:scripted(views,clock),clock,started:-5000,marks,print:line=>lines.push(line),...(confirmWaitMs?{confirmWaitMs}:{})});}catch(e){error=e;}
+ return {lines,result,error,marks,clock};
+};
+
+test('follow prints "approved, payout submitted", waits for the confirmation and ends with the timing summary',async()=>{
+ const submitted=view('completed',{intake:intakeOk,decision:approved,payout:{phase:'done',state:'submitted',tx_hash:TX}});
+ const {lines,error}=await followRun([view('initial_check'),submitted,submitted,{...submitted,payout:{...submitted.payout,state:'confirmed'}}]);
+ assert.equal(error,undefined);
+ assert.match(lines.find(l=>l.includes('status=initial_check')),/^\[\d\d:\d\d:\d\d \+5\.0s\] status=initial_check intake=submitted$/);
+ assert.match(lines.find(l=>l.includes('approved, payout submitted')),/^\[[0-9:]+ \+7\.0s\] approved, payout submitted \(waiting up to 3m00s for its confirmation\)$/);
+ assert.match(lines.find(l=>l.endsWith('payout confirmed')),/^\[[0-9:]+ \+11\.0s\] payout confirmed$/);
+ assert.ok(lines.includes(`Intake payment: https://preprod.cardanoscan.io/transaction/${TX}`));
+ assert.ok(lines.includes('Decision: PAY (approved, decided by initial_check)'));
+ const t=lines.indexOf('Timing (first seen by this run, since the demo started):');
+ assert.ok(t>lines.indexOf('Decision: PAY (approved, decided by initial_check)'));
+ assert.deepEqual(lines.slice(t+1),['  intake paid (202 received)  +4.0s','  intake confirmed            +7.0s','  decision reached            +7.0s','  payout submitted            +7.0s',
+  '  payout confirmed            +11.0s','  intake paid -> confirmed (Main clock): 21.4s']);
+});
+
+test('follow --no-wait-confirm stops at the submitted payout; a confirmation timeout still exits 0 with a warning',async()=>{
+ const submitted=view('completed',{intake:intakeOk,decision:approved,payout:{phase:'done',state:'submitted'}});
+ const confirmed={...submitted,payout:{phase:'done',state:'confirmed'}};
+ const quick=await followRun([submitted,confirmed],{options:{waitConfirm:false}});
+ assert.equal(quick.error,undefined);assert.equal(quick.clock.t,0);
+ assert.match(quick.lines.find(l=>l.includes('approved, payout submitted')),/\] approved, payout submitted$/);
+ assert.ok(quick.lines.some(l=>l.startsWith('Payout submitted; not waiting for its confirmation (--no-wait-confirm)')));
+ assert.ok(!quick.lines.some(l=>l.endsWith('payout confirmed')));
+ const slow=await followRun([submitted],{confirmWaitMs:4000});
+ assert.equal(slow.error,undefined);assert.equal(slow.result.confirmTimedOut,true);assert.equal(slow.clock.t,4000);
+ assert.ok(slow.lines.some(l=>l.startsWith('Warning: the supplier payout is still submitted, not confirmed, after 4.0s.')));
+ assert.deepEqual(slow.lines.slice(-2),['  payout submitted            +5.0s','  intake paid -> confirmed (Main clock): 21.4s']);
+});
+
+test('follow fails with a clear message for the intake stop codes and still prints the timing',async()=>{
+ const notConfirmed=await followRun([view('failed',{intake:{...intakeOk,state:'failed',confirmed_at:null},inspection:{code:'intake_not_confirmed'}})]);
+ assert.match(notConfirmed.error.message,/ended with status failed \(intake_not_confirmed\): the intake payment failed on chain, so Main paid no investigator and no supplier\. Intake: https:\/\/preprod\.cardanoscan\.io\/transaction\/(ab){32}\. Inspect /);
+ assert.equal(notConfirmed.lines.at(-1),'  intake paid (202 received)  +4.0s');
+ const unknown=await followRun([view('needs_inspection',{inspection:{code:'intake_unconfirmed'}})]);
+ assert.match(unknown.error.message,/needs_inspection \(intake_unconfirmed\): the intake payment was not confirmed in time; Main paid no investigator and no supplier\. Check the intake transaction before any retry\. Intake: /);
+ assert.equal(failureMessage(CASE,{status:'failed',inspection:{code:'initial_check_unreachable'}}),`Case ${CASE} ended with status failed (initial_check_unreachable). Inspect .local/main/cases/${CASE}/case.json.`);
+ // A payout confirmation that fails in the background turns the completed case into needs_inspection: non-zero exit.
+ const submitted=view('completed',{intake:intakeOk,decision:approved,payout:{phase:'submitted',state:'submitted'}});
+ const flipped=await followRun([submitted,{...submitted,status:'needs_inspection',payout:{phase:'error',state:'unknown'},inspection:{code:'payout_invalid_response'}}]);
+ assert.match(flipped.error.message,/ended with status needs_inspection \(payout_invalid_response\)\. Inspect /);
+ assert.ok(flipped.lines.some(l=>l.includes('approved, payout submitted')));
+ const timeout=await followRun([view('investigating')],{options:{timeoutMs:4000}});
+ assert.match(timeout.error.message,/not finished after 4000 ms/);
+});
+
+test('intakeRefusal explains the 503 cap only for a refusal before signing',()=>{
+ const refused={phase:'failed_before_signing',response:{status:503,body:JSON.stringify({error:'too_many_unconfirmed_intakes'})}};
+ assert.match(intakeRefusal(refused),/^Main refused the intake with HTTP 503 too_many_unconfirmed_intakes: .*MAX_UNCONFIRMED_INTAKES, default 5\)\. No payment was signed\./);
+ assert.equal(intakeRefusal({...refused,phase:'unknown'}),null);
+ assert.equal(intakeRefusal({...refused,response:{status:503,body:'{"error":"other"}'}}),null);
+ assert.equal(intakeRefusal({...refused,response:{status:500,body:refused.response.body}}),null);
+ assert.equal(intakeRefusal({...refused,response:{status:503,body:'oops'}}),null);
+ assert.equal(intakeRefusal(null),null);
+});
+
 test('progressLine summarizes the public case view',()=>{
+ assert.equal(progressLine(view('payout',{band:'low',risk_score:0})),'status=payout intake=submitted band=low score=0');
  assert.equal(progressLine({status:'accepted',band:null,risk_score:null,investigators:null,decision:null,payout:null,inspection:null}),'status=accepted');
  const line=progressLine({status:'completed',band:'medium',risk_score:35,
   investigators:{invoice:{payment:'paid',report:'completed',verdict:'PAY'},wallet:{payment:'paid',report:'timeout',verdict:null},supplier:{payment:null,report:null,verdict:null}},

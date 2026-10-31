@@ -1,6 +1,9 @@
 // Test customer for one paid end-to-end Sniffer case on Cardano Preprod (T29).
 // Pays the Main intake (POST /v1/invoices, x402 gate) from the `payer` wallet with payOnce, then polls
 // GET /v1/cases/{id} until the case is completed, failed or needs inspection, and prints the decision.
+// Main answers the intake 202 once the payment is submitted (confirmation follows in the background) and may complete a case
+// with payout.state 'submitted'; the demo then keeps polling (up to 3 min, --no-wait-confirm skips it) for 'confirmed'.
+// Every status line shows the time since the demo started; a timing summary closes the run.
 // Run only with explicit user approval (Main must be running: npm run main -- --confirm-live-payments):
 //   npm run demo -- --confirm-live-payment [--fixture docs/fixtures/f1.xml] [--invoice-number RE-2026-0413] [--recipient-wallet payee] [--new-supplier]
 // Poll an existing case without paying: npm run demo -- --case case-<32 hex>
@@ -19,7 +22,8 @@ export const ROOT=resolve(dirname(fileURLToPath(import.meta.url)),'..');
 export const DEFAULT_FIXTURE='docs/fixtures/f1.xml';
 export const DEFAULT_WALLET='payer';
 export const DEFAULT_TIMEOUT_MS=45*60_000; // investigation 15 min + Main LLM 5 min + payout confirm 10 min + payments
-export const DEFAULT_POLL_MS=15_000;
+export const DEFAULT_POLL_MS=2_000;
+export const DEFAULT_CONFIRM_WAIT_MS=3*60_000; // completed with payout.state 'submitted': poll this long for 'confirmed'
 export const PAYER_MARGIN_LOVELACE=2_000_000n; // fee + min-UTxO change above the intake price
 const INVOICE_NUMBER_RE=/^[A-Za-z0-9][A-Za-z0-9._\/-]{0,63}$/;
 const ADDRESS_RE=/^addr_test1[0-9a-z]{20,}$/;
@@ -43,7 +47,8 @@ Options:
   --wallet <name>             paying x402 wallet (default ${DEFAULT_WALLET})
   --main-url <url>            Main API (default http://127.0.0.1:$MAIN_PORT or :21951)
   --timeout-ms <n>            polling timeout (default ${DEFAULT_TIMEOUT_MS})
-  --poll-ms <n>               polling interval (default ${DEFAULT_POLL_MS})`;
+  --poll-ms <n>               polling interval (default ${DEFAULT_POLL_MS})
+  --no-wait-confirm           stop when the case is completed with the payout only submitted (default: wait up to ${DEFAULT_CONFIRM_WAIT_MS/60_000} min for confirmed)`;
 
 const VALUE_FLAGS={'--fixture':'fixture','--invoice-number':'invoiceNumber','--recipient-wallet':'recipientWallet','--wallet':'wallet','--main-url':'mainUrl',
  '--timeout-ms':'timeoutMs','--poll-ms':'pollMs','--case':'caseId','--supplier-vat':'supplierVat','--supplier-name':'supplierName'};
@@ -52,12 +57,13 @@ const VALUE_FLAGS={'--fixture':'fixture','--invoice-number':'invoiceNumber','--r
 export function parseArgs(argv,env={}){
  const options={confirm:false,help:false,fixture:DEFAULT_FIXTURE,invoiceNumber:null,recipientWallet:null,wallet:DEFAULT_WALLET,
   mainUrl:`http://127.0.0.1:${env.MAIN_PORT?.trim()||21951}`,timeoutMs:DEFAULT_TIMEOUT_MS,pollMs:DEFAULT_POLL_MS,caseId:null,
-  newSupplier:false,supplierVat:null,supplierName:null};
+  newSupplier:false,supplierVat:null,supplierName:null,waitConfirm:true};
  for(let i=0;i<argv.length;i++){
   const arg=argv[i];
   if(arg===CONFIRM_FLAG){options.confirm=true;continue;}
   if(arg==='--help'||arg==='-h'){options.help=true;continue;}
   if(arg==='--new-supplier'){options.newSupplier=true;continue;}
+  if(arg==='--no-wait-confirm'){options.waitConfirm=false;continue;}
   const key=VALUE_FLAGS[arg];
   if(!key)throw new Error(`Unknown argument: ${arg}\n${USAGE}`);
   const value=argv[++i];
@@ -272,35 +278,94 @@ export function caseIdFromJournal(journal){
  try{const body=JSON.parse(journal?.response?.body??'');return typeof body?.case_id==='string'&&CASE_ID_RE.test(body.case_id)?body.case_id:null;}catch{return null;}
 }
 
+/** Completed, but the supplier payout is only submitted (Main confirms it in the background). */
+export const payoutUnconfirmed=view=>view?.status==='completed'&&view.payout?.state==='submitted';
+
 /**
  * Polls fetchCase(caseId) until a terminal status or the deadline. Network errors and 5xx are retried until the deadline;
  * 404 stops at once (the case is created before the 202, so it should always exist).
- * @param {object} options {caseId, fetchCase:(id)=>Promise<{status:number,body:any}>, timeoutMs, pollMs, clock:{now,sleep}, onUpdate}
- * @returns {Promise<{done:boolean,view:object|null,timedOut:boolean}>}
+ * With waitConfirm, a completed case whose payout is only submitted is polled on until payout.state is no longer 'submitted'
+ * or confirmWaitMs after it was first seen (then confirmTimedOut; the overall deadline no longer applies).
+ * @param {object} options {caseId, fetchCase:(id)=>Promise<{status:number,body:any}>, timeoutMs, pollMs, clock:{now,sleep}, onUpdate, waitConfirm, confirmWaitMs}
+ * @returns {Promise<{done:boolean,view:object|null,timedOut:boolean,confirmTimedOut:boolean}>}
  */
-export async function pollCase({caseId,fetchCase,timeoutMs,pollMs,clock,onUpdate=()=>{}}){
+export async function pollCase({caseId,fetchCase,timeoutMs,pollMs,clock,onUpdate=()=>{},waitConfirm=true,confirmWaitMs=DEFAULT_CONFIRM_WAIT_MS}){
  const deadline=clock.now()+timeoutMs;
- let view=null;
+ let view=null,confirmDeadline=null;
  for(;;){
   let result;
   try{result=await fetchCase(caseId);}catch(error){result={status:0,error};}
   if(result.status===200&&result.body&&typeof result.body==='object'){
    view=result.body;
    onUpdate({type:'view',view});
-   if(TERMINAL_STATUSES.has(view.status))return {done:true,view,timedOut:false};
+   if(TERMINAL_STATUSES.has(view.status)){
+    if(!waitConfirm||!payoutUnconfirmed(view))return {done:true,view,timedOut:false,confirmTimedOut:false};
+    confirmDeadline??=clock.now()+confirmWaitMs;
+   }
   }else if(result.status===404){
    throw new Error(`Case ${caseId} not found at the Main API. Check --main-url and MAIN_STATE_DIR.`);
   }else onUpdate({type:'error',status:result.status,error:result.error});
-  const now=clock.now();
-  if(now>=deadline)return {done:false,view,timedOut:true};
-  await clock.sleep(Math.max(1,Math.min(pollMs,deadline-now)));
+  const now=clock.now(),until=confirmDeadline??deadline;
+  if(now>=until)return confirmDeadline===null?{done:false,view,timedOut:true,confirmTimedOut:false}:{done:true,view,timedOut:false,confirmTimedOut:true};
+  await clock.sleep(Math.max(1,Math.min(pollMs,until-now)));
  }
 }
 
-/** One status line per change (status, investigators, decision, payout). */
+/** Elapsed time for status lines: 12.3s below a minute, else 4m05s. */
+export function formatElapsed(ms){
+ const tenths=Math.floor(Math.max(0,ms)/100);
+ if(tenths<600)return `${(tenths/10).toFixed(1)}s`;
+ const s=Math.floor(tenths/10);
+ return `${Math.floor(s/60)}m${String(s%60).padStart(2,'0')}s`;
+}
+
+export const MILESTONES=Object.freeze([['intakePaid','intake paid (202 received)'],['intakeConfirmed','intake confirmed'],['decision','decision reached'],
+ ['payoutSubmitted','payout submitted'],['payoutConfirmed','payout confirmed']]);
+
+/** Records the first elapsed time (ms since the demo started) each milestone is seen in a case view. intakePaid is set by the pay path. */
+export function trackMilestones(marks,view,at){
+ const set=(key,on)=>{if(on&&marks[key]===undefined)marks[key]=at;};
+ const payout=view?.payout?.state;
+ set('intakeConfirmed',view?.intake?.state==='confirmed');
+ set('decision',Boolean(view?.decision));
+ set('payoutSubmitted',payout==='submitted'||payout==='confirmed');
+ set('payoutConfirmed',payout==='confirmed');
+ return marks;
+}
+
+/** Timing summary lines in time order, plus Main's own paid_at -> confirmed_at for the intake when the view has both. */
+export function timingLines(marks,view=null){
+ const rows=MILESTONES.filter(([key])=>Number.isFinite(marks[key])).map(([key,label])=>[marks[key],label]).sort((a,b)=>a[0]-b[0]);
+ const paid=Date.parse(view?.intake?.paid_at??''),confirmed=Date.parse(view?.intake?.confirmed_at??'');
+ const server=Number.isFinite(paid)&&Number.isFinite(confirmed)&&confirmed>=paid?`  intake paid -> confirmed (Main clock): ${formatElapsed(confirmed-paid)}`:null;
+ if(!rows.length&&!server)return [];
+ const width=Math.max(0,...rows.map(([,label])=>label.length));
+ return ['Timing (first seen by this run, since the demo started):',...rows.map(([at,label])=>`  ${label.padEnd(width)}  +${formatElapsed(at)}`),...(server?[server]:[])];
+}
+
+const STOP_HINTS=Object.freeze({
+ intake_not_confirmed:'the intake payment failed on chain, so Main paid no investigator and no supplier',
+ intake_unconfirmed:'the intake payment was not confirmed in time; Main paid no investigator and no supplier. Check the intake transaction before any retry',
+});
+
+/** Final error message for a case that ended failed or needs_inspection. */
+export function failureMessage(caseId,view){
+ const code=view?.inspection?.code??null,hint=STOP_HINTS[code],tx=view?.intake?.tx_hash;
+ return `Case ${caseId} ended with status ${view?.status}${code?` (${code})`:''}${hint?`: ${hint}`:''}.${hint&&tx?` Intake: ${EXPLORER}${tx}.`:''} Inspect .local/main/cases/${caseId}/case.json.`;
+}
+
+/** Message for an intake Main refused before any payment (503 too_many_unconfirmed_intakes in the payOnce journal), or null. */
+export function intakeRefusal(journal){
+ if(journal?.phase!=='failed_before_signing'||journal.response?.status!==503)return null;
+ let code=null;try{code=JSON.parse(journal.response.body??'').error;}catch{}
+ if(code!=='too_many_unconfirmed_intakes')return null;
+ return 'Main refused the intake with HTTP 503 too_many_unconfirmed_intakes: too many earlier intake payments are not confirmed yet (MAX_UNCONFIRMED_INTAKES, default 5). No payment was signed. Wait a minute and rerun the same command.';
+}
+
+/** One status line per change (status, intake, investigators, decision, payout). */
 export function progressLine(view){
  const inv=view.investigators?Object.entries(view.investigators).map(([role,entry])=>`${role}:${entry.payment??'-'}/${entry.report??'-'}${entry.verdict?`(${entry.verdict})`:''}`).join(' '):'';
- return [`status=${view.status}`,view.band?`band=${view.band}`:'',view.risk_score!==null&&view.risk_score!==undefined?`score=${view.risk_score}`:'',inv,
+ return [`status=${view.status}`,view.intake?.state?`intake=${view.intake.state}`:'',view.band?`band=${view.band}`:'',view.risk_score!==null&&view.risk_score!==undefined?`score=${view.risk_score}`:'',inv,
   view.decision?`decision=${view.decision.decision}/${view.decision.final_decision}`:'',view.payout?`payout=${view.payout.phase}${view.payout.state?`/${view.payout.state}`:''}`:'',
   view.inspection?`inspection=${view.inspection.code}`:''].filter(Boolean).join(' ');
 }
@@ -314,26 +379,52 @@ async function getJson(url,{timeoutMs=20_000}={}){
  return {status:response.status,body};
 }
 
-async function follow(options,caseId){
- out(`Case ${caseId}: ${options.mainUrl}/v1/cases/${caseId}`);
- let last='';
- const result=await pollCase({caseId,timeoutMs:options.timeoutMs,pollMs:options.pollMs,clock:systemClock,
-  fetchCase:id=>getJson(`${options.mainUrl}/v1/cases/${id}`),
+/** Status line prefix: wall-clock time (UTC) and the time since the demo started. */
+const stampFor=(clock,started)=>()=>`[${new Date(clock.now()).toISOString().slice(11,19)} +${formatElapsed(clock.now()-started)}]`;
+
+/**
+ * Follows a case to its end and prints status lines, links, the decision and the timing summary.
+ * Resolves for completed (also when the payout confirmation wait timed out, with a warning); throws otherwise.
+ */
+export async function follow(options,caseId,{fetchCase=id=>getJson(`${options.mainUrl}/v1/cases/${id}`),clock=systemClock,started=clock.now(),marks={},
+ confirmWaitMs=DEFAULT_CONFIRM_WAIT_MS,print=out}={}){
+ const stamp=stampFor(clock,started);
+ print(`Case ${caseId}: ${options.mainUrl}/v1/cases/${caseId}`);
+ let last='',submittedNoted=false,confirmedNoted=false;
+ const result=await pollCase({caseId,timeoutMs:options.timeoutMs,pollMs:options.pollMs,clock,fetchCase,waitConfirm:options.waitConfirm!==false,confirmWaitMs,
   onUpdate:event=>{
-   if(event.type==='view'){const line=progressLine(event.view);if(line!==last){out(`[${new Date().toISOString()}] ${line}`);last=line;}}
-   else out(`[${new Date().toISOString()}] Main API not answering (HTTP ${event.status||'none'}); retrying`);
+   if(event.type!=='view'){print(`${stamp()} Main API not answering (HTTP ${event.status||'none'}); retrying`);return;}
+   const view=event.view;
+   trackMilestones(marks,view,clock.now()-started);
+   const line=progressLine(view);
+   if(line!==last){print(`${stamp()} ${line}`);last=line;}
+   if(payoutUnconfirmed(view)&&!submittedNoted){
+    submittedNoted=true;
+    print(`${stamp()} approved, payout submitted${options.waitConfirm!==false?` (waiting up to ${formatElapsed(confirmWaitMs)} for its confirmation)`:''}`);
+   }else if(submittedNoted&&!confirmedNoted&&view.payout?.state==='confirmed'){confirmedNoted=true;print(`${stamp()} payout confirmed`);}
   }});
- if(result.view){
-  out(JSON.stringify(result.view,null,1));
-  for(const [role,entry] of Object.entries(result.view.investigators??{}))if(entry.payment_tx_hash)out(`${role} payment: ${EXPLORER}${entry.payment_tx_hash}`);
-  if(result.view.payout?.tx_hash)out(`Supplier payout: ${EXPLORER}${result.view.payout.tx_hash}`);
+ const view=result.view;
+ if(view){
+  print(JSON.stringify(view,null,1));
+  if(view.intake?.tx_hash)print(`Intake payment: ${EXPLORER}${view.intake.tx_hash}`);
+  for(const [role,entry] of Object.entries(view.investigators??{}))if(entry.payment_tx_hash)print(`${role} payment: ${EXPLORER}${entry.payment_tx_hash}`);
+  if(view.payout?.tx_hash)print(`Supplier payout: ${EXPLORER}${view.payout.tx_hash}`);
  }
- if(result.timedOut)throw new Error(`Case ${caseId} is not finished after ${options.timeoutMs} ms. Follow it later with: npm run demo -- --case ${caseId}`);
- if(result.view.status!=='completed')throw new Error(`Case ${caseId} ended with status ${result.view.status}${result.view.inspection?` (${result.view.inspection.code})`:''}. Inspect .local/main/cases/${caseId}/case.json.`);
- out(`Decision: ${result.view.decision?.decision??'none'} (${result.view.decision?.final_decision??'-'}, decided by ${result.view.decision?.decided_by??'-'})`);
+ let failure=null;
+ if(result.timedOut)failure=`Case ${caseId} is not finished after ${options.timeoutMs} ms. Follow it later with: npm run demo -- --case ${caseId}`;
+ else if(view.status!=='completed')failure=failureMessage(caseId,view);
+ else{
+  print(`Decision: ${view.decision?.decision??'none'} (${view.decision?.final_decision??'-'}, decided by ${view.decision?.decided_by??'-'})`);
+  if(payoutUnconfirmed(view))print(result.confirmTimedOut
+   ?`Warning: the supplier payout is still submitted, not confirmed, after ${formatElapsed(confirmWaitMs)}. Main keeps confirming it; follow it with: npm run demo -- --case ${caseId}`
+   :`Payout submitted; not waiting for its confirmation (--no-wait-confirm). Follow it with: npm run demo -- --case ${caseId}`);
+ }
+ for(const line of timingLines(marks,view))print(line);
+ if(failure)throw new Error(failure);
+ return result;
 }
 
-async function payIntake(options){
+async function payIntake(options,{clock,started,marks}){
  const env=process.env;
  const [{payOnce,lovelaceString,readPayJournal,payJournalPath},{readWallet,walletAddress,fetchBalance,formatAda,NETWORK},{blockfrostProvider},{toClientCardanoSigner}]=await Promise.all([
   import('../x402/pay.mjs'),import('../x402/wallets.mjs'),import('../x402/facilitator.mjs'),import('@x402/cardano')]);
@@ -365,20 +456,30 @@ async function payIntake(options){
  }else out(`Payment journal exists (phase ${earlier.phase}); payOnce returns it or refuses for inspection.`);
  const signer=toClientCardanoSigner({mnemonic:wallet.mnemonic,network:NETWORK,provider:blockfrostProvider(projectId)});
  if(signer.getAddress()!==wallet.address)throw new Error(`Signer address does not match wallet ${options.wallet}.`);
- const journal=await payOnce({url:`${options.mainUrl}/v1/invoices`,key,journalDir,signer,payTo,maxLovelace:price,
-  init:{method:'POST',headers:{'content-type':'application/json',accept:'application/json'},body:JSON.stringify({xml})}});
- out(`Intake ${journal.phase}${journal.paymentMade===false?' (no new payment)':''}${journal.txHash?`: ${EXPLORER}${journal.txHash}`:''}`);
+ let journal;
+ try{
+  journal=await payOnce({url:`${options.mainUrl}/v1/invoices`,key,journalDir,signer,payTo,maxLovelace:price,
+   init:{method:'POST',headers:{'content-type':'application/json',accept:'application/json'},body:JSON.stringify({xml})}});
+ }catch(error){
+  let after=null;try{after=readPayJournal(payJournalPath(journalDir,key));}catch{}
+  const refusal=intakeRefusal(after);
+  throw refusal?new Error(refusal):error;
+ }
+ // A 202 this run (Main answers once the payment is submitted; it confirms in the background), not a journal replay.
+ if(!earlier||!['paid','no_payment_required'].includes(earlier.phase))marks.intakePaid=clock.now()-started;
+ out(`${stampFor(clock,started)()} Intake ${journal.phase}${journal.paymentMade===false?' (no new payment)':''}${journal.txHash?`: ${EXPLORER}${journal.txHash}`:''}`);
  const fromBody=caseIdFromJournal(journal);
  if(fromBody&&fromBody!==caseId)out(`Warning: Main answered case ${fromBody}, expected ${caseId}; following Main's case.`);
  return fromBody??caseId;
 }
 
-export async function main(argv){
+export async function main(argv,{clock=systemClock}={}){
+ const started=clock.now(),marks={};
  const options=parseArgs(argv,process.env);
  if(options.help){out(USAGE);return;}
  assertConfirmed(options);
- const caseId=options.caseId??await payIntake(options);
- await follow(options,caseId);
+ const caseId=options.caseId??await payIntake(options,{clock,started,marks});
+ await follow(options,caseId,{clock,started,marks});
 }
 
 if(process.argv[1]&&import.meta.url===pathToFileURL(resolve(process.argv[1])).href){

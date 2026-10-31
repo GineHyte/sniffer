@@ -21,17 +21,32 @@ info:
     `202` with the existing case.
 
     **Payment (x402 v2, Cardano Preprod, scheme `exact`, asset `lovelace`).** Cardano supports only the
-    authorization flow (`docs/x402-notes.md` §3.2, §4): the gate verifies the signed transaction, settles it
-    itself, and accepts the case only after a *confirmed* settlement of exactly that transaction
-    (mempool never counts):
+    authorization flow (`docs/x402-notes.md` §3.2, §4): the gate verifies the signed transaction and submits it
+    itself. Main runs the gate with `acceptOn: 'submitted'`, so it answers `202` as soon as exactly that
+    transaction is verified and submitted, before it is confirmed on chain:
 
     1. `POST /v1/invoices` with the XML and no `PAYMENT-SIGNATURE` → `402`, body `{}`, requirements
        base64-encoded in the `PAYMENT-REQUIRED` header (`amount` = `INTAKE_PRICE_LOVELACE`,
        `payTo` = `INTAKE_PAY_TO`, `resource.description` = `Sniffer invoice check`).
     2. Retry the **same body** with the base64 `PaymentPayload` in `PAYMENT-SIGNATURE`.
-    3. `202` with `{case_id, status, status_url, payment_tx_hash}` and the receipt in `PAYMENT-RESPONSE`.
+    3. `202` with `{case_id, status, status_url, payment_tx_hash}` and the receipt in `PAYMENT-RESPONSE`
+       (`extra.status: submitted`). The case starts at once with `intake.state: submitted`.
 
-    The body is parsed and validated before the gate runs, so 400/413/415 come before any 402.
+    **Latency model and the intake safety rule.** The customer waits only for the submission. Main confirms
+    the intake transaction in the background (`intake.state` → `confirmed` or `failed` in the case view).
+    The initial check and, for a medium case, the Sokosumi task creation run meanwhile, but **no money moves before
+    `intake.state` is `confirmed`**: investigator payments and the supplier payout wait for it. An intake that
+    fails on chain ends the case as `failed` with `inspection.code: intake_not_confirmed`; one not confirmed in
+    time (`INTAKE_CONFIRM_TIMEOUT_MS`, default 10 min) stops it as `needs_inspection` with
+    `intake_unconfirmed`. A high-band case moves no money and may complete while its intake is still
+    `submitted`. The supplier payout is confirmed in the background too: a case can reach `completed` with
+    `payout.state: submitted`, which later becomes `confirmed`.
+
+    **Unconfirmed-intake cap.** While `MAX_UNCONFIRMED_INTAKES` (default 5) cases wait for their intake
+    confirmation, a request for a new case answers `503 too_many_unconfirmed_intakes` before the gate runs, so
+    no payment is requested or taken. A repeat request for an existing case is never refused.
+
+    The body is parsed and validated before the gate runs, so 400/413/415 (and the 503) come before any 402.
 
     No authentication besides the x402 payment. `GET /v1/cases/{case_id}` is public to anyone who knows the
     case ID and shows no raw invoice data, addresses or report prose.
@@ -89,10 +104,13 @@ paths:
         3. JSON must be an object with exactly one key `xml` of type string; otherwise, or for invalid JSON,
            invalid UTF-8 or a blank XML → `400 invalid_request`.
         4. XML longer than `MAX_XML_BYTES` UTF-8 bytes (default 500000) → `413 xml_too_large`.
-        5. x402 gate on resource `xml-<sha256(xml)>`.
+        5. New case only: `MAX_UNCONFIRMED_INTAKES` (default 5) cases already wait for their intake confirmation →
+           `503 too_many_unconfirmed_intakes`. No payment is requested or taken.
+        6. x402 gate on resource `xml-<sha256(xml)>`.
 
-        On a confirmed payment the case is created (status `accepted`) unless it already exists, and the case
-        runner is started (or resumed) in the background.
+        On a verified and submitted payment the case is created (status `accepted`, `intake.state: submitted`)
+        unless it already exists, and the case runner is started (or resumed) in the background. The intake is
+        confirmed in the background; no money moves for the case before `intake.state` is `confirmed`.
       security: []
       parameters:
         - $ref: '#/components/parameters/PaymentSignature'
@@ -116,8 +134,9 @@ paths:
       responses:
         '202':
           description: |
-            Paid and accepted. The case runs asynchronously; poll `status_url`. Also returned for a repeat
-            submission of an already paid XML (same case, current `status`, the original `payment_tx_hash`).
+            Payment verified and submitted (not necessarily confirmed yet) and the case accepted. The case runs
+            asynchronously; poll `status_url` and read `intake.state` for the confirmation. Also returned for a
+            repeat submission of an already paid XML (same case, current `status`, the original `payment_tx_hash`).
             `PAYMENT-RESPONSE` carries the settlement receipt whenever the gate journal holds one.
           headers:
             PAYMENT-RESPONSE:
@@ -188,6 +207,20 @@ paths:
                 error: unsupported_media_type
         '500':
           $ref: '#/components/responses/ServerError'
+        '503':
+          description: |
+            `too_many_unconfirmed_intakes`: `MAX_UNCONFIRMED_INTAKES` (default 5) cases are waiting for their intake
+            confirmation. Sent before the x402 gate, so no payment was requested or taken. Only a request for a new
+            case is refused; retry once earlier intakes are confirmed.
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/CacheControlNoStore'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: too_many_unconfirmed_intakes
   /v1/cases/{case_id}:
     parameters:
       - name: case_id
@@ -207,6 +240,11 @@ paths:
         `completed`, `failed` and `needs_inspection`; every other status is still moving. A case that stopped in
         `needs_inspection` is not retried automatically: an external write may have happened and an operator
         must inspect it.
+
+        Background confirmations can still change a terminal case: `intake.state` of a case that completed without
+        moving money (high band) may go from `submitted` to `confirmed` or `failed`, and a `completed` case with
+        `payout.state: submitted` moves to `payout.state: confirmed` (`payout.phase: done`). If that payout
+        confirmation fails, the case becomes `needs_inspection` with `inspection.code: payout_<code>`.
       security: []
       responses:
         '200':
@@ -227,6 +265,11 @@ paths:
                     created_at: '2026-10-31T10:00:00.000Z'
                     updated_at: '2026-10-31T10:09:41.512Z'
                     check_id: chk_01JBX7ZQ8V3K6M2N4P5R7S9T0W
+                    intake:
+                      tx_hash: 4fcbf4357e8a6d6eb55e4d03f573e028d40957fd3d15b604d517afc37814e967
+                      state: confirmed
+                      paid_at: '2026-10-31T10:00:00.000Z'
+                      confirmed_at: '2026-10-31T10:00:21.400Z'
                     band: medium
                     risk_score: 58
                     investigators:
@@ -270,6 +313,11 @@ paths:
                     created_at: '2026-10-31T10:00:00.000Z'
                     updated_at: '2026-10-31T10:00:03.210Z'
                     check_id: chk_01JBX8A1B2C3D4E5F6G7H8J9K0
+                    intake:
+                      tx_hash: 1a3c5e7b9d0f2a4c6e8b0d1f3a5c7e9b2d4f6a8c0e1b3d5f7a9c2e4b6d8f0a1c
+                      state: submitted
+                      paid_at: '2026-10-31T10:00:00.000Z'
+                      confirmed_at: null
                     band: high
                     risk_score: 100
                     investigators: null
@@ -286,13 +334,18 @@ paths:
                     payout: null
                     inspection: null
                 accepted:
-                  summary: Just paid, initial check not started yet
+                  summary: Just paid (submitted, not confirmed yet), initial check not started yet
                   value:
                     case_id: case-bf5ea9d6dbe16d1326a4e046446ab883
                     status: accepted
                     created_at: '2026-10-31T10:00:00.000Z'
                     updated_at: '2026-10-31T10:00:00.000Z'
                     check_id: null
+                    intake:
+                      tx_hash: 3e5a7c9b1d2f4e6a8c0b2d4f6e8a1c3b5d7f9e0a2c4b6d8f1e3a5c7b9d0f2e4a
+                      state: submitted
+                      paid_at: '2026-10-31T10:00:00.000Z'
+                      confirmed_at: null
                     band: null
                     risk_score: null
                     investigators: null
@@ -307,6 +360,11 @@ paths:
                     created_at: '2026-10-31T10:00:00.000Z'
                     updated_at: '2026-10-31T10:02:00.000Z'
                     check_id: null
+                    intake:
+                      tx_hash: 5b7d9f1a3c5e7b9d0f2a4c6e8b0d1f3a5c7e9b2d4f6a8c0e1b3d5f7a9c2e4b6d
+                      state: confirmed
+                      paid_at: '2026-10-31T10:00:00.000Z'
+                      confirmed_at: '2026-10-31T10:00:19.050Z'
                     band: null
                     risk_score: null
                     investigators: null
@@ -314,6 +372,56 @@ paths:
                     payout: null
                     inspection:
                       code: initial_check_unknown
+                low_completed_payout_submitted:
+                  summary: Low band, approved, payout submitted and not confirmed yet (it becomes confirmed in the background)
+                  value:
+                    case_id: case-0d2f4a6c8e1b3d5f7a9c2e4b6d8f0a1c
+                    status: completed
+                    created_at: '2026-10-31T10:00:00.000Z'
+                    updated_at: '2026-10-31T10:00:29.700Z'
+                    check_id: chk_01JBX9C3D4E5F6G7H8J9K0M1N2
+                    intake:
+                      tx_hash: 6c8e0a2b4d6f8a1c3e5b7d9f0a2c4e6b8d1f3a5c7e9b0d2f4a6c8e1b3d5f7a9c
+                      state: confirmed
+                      paid_at: '2026-10-31T10:00:00.000Z'
+                      confirmed_at: '2026-10-31T10:00:20.300Z'
+                    band: low
+                    risk_score: 10
+                    investigators: null
+                    decision:
+                      decision: PAY
+                      final_decision: approved
+                      reason_type: null
+                      block_wallet: false
+                      decline_reasons: []
+                      decided_by: initial_check
+                    payout:
+                      phase: submitted
+                      state: submitted
+                      payout_id: pay_01JC3N5P7Q9R1S3T5V7W9X1Y3Z
+                      tx_hash: 8a0c2e4b6d8f1a3c5e7b9d0f2a4c6e8b1d3f5a7c9e0b2d4f6a8c1e3b5d7f9a0c
+                      code: null
+                    inspection: null
+                intake_not_confirmed:
+                  summary: Intake payment failed on chain; no investigator or supplier was paid
+                  value:
+                    case_id: case-9e1b3d5f7a0c2e4b6d8f1a3c5e7b9d0f
+                    status: failed
+                    created_at: '2026-10-31T10:00:00.000Z'
+                    updated_at: '2026-10-31T10:03:12.000Z'
+                    check_id: chk_01JBXAD4E5F6G7H8J9K0M1N2P3
+                    intake:
+                      tx_hash: 7f9a1c3e5b7d9f0a2c4e6b8d1f3a5c7e9b0d2f4a6c8e1b3d5f7a9c2e4b6d8f0a
+                      state: failed
+                      paid_at: '2026-10-31T10:00:00.000Z'
+                      confirmed_at: null
+                    band: medium
+                    risk_score: 38
+                    investigators: null
+                    decision: null
+                    payout: null
+                    inspection:
+                      code: intake_not_confirmed
         '404':
           description: Unknown case, or `case_id` does not match `^case-[0-9a-f]{32}$`. Also returned for any unknown path.
           headers:
@@ -368,8 +476,9 @@ components:
     PaymentResponse:
       description: |
         x402 v2 settlement receipt: base64 (standard alphabet) of the JSON `X402SettleResponse`.
-        On 202 it reports `success: true` for the confirmed transaction. On a 402 after a failed settlement it
-        reports `success: false` with `errorReason`.
+        On 202 it reports `success: true` for the submitted transaction, with `extra.status: submitted` until the
+        intake is confirmed (`confirmed` on a later repeat request). On a 402 after a failed settlement it reports
+        `success: false` with `errorReason`.
       schema:
         type: string
         contentEncoding: base64
@@ -544,13 +653,17 @@ components:
     CaseStatus:
       type: string
       description: |
-        `accepted`: paid, journaled, not started. `initial_check`: the Rust initial check is running (also stays
-        here for a low-band case until the payout starts). `investigating`: medium band, Sokosumi tasks,
-        investigator payments and report polling (up to `INVESTIGATION_TIMEOUT_MS`, default 15 min).
+        `accepted`: paid (intake submitted), journaled, not started. `initial_check`: the Rust initial check is
+        running (also stays here for a low-band case until the payout starts, including while it waits for
+        `intake.state: confirmed`; there is no separate status for that wait). `investigating`: medium band, Sokosumi
+        tasks (created before the intake confirms), investigator payments (only after `intake.state: confirmed`) and
+        report polling (up to `INVESTIGATION_TIMEOUT_MS`, default 15 min).
         `deciding`: the Main LLM and the decision POST. `payout`: the supplier payout is running.
-        Terminal: `completed` (a decision exists; a refused payout also ends here), `failed` (the backend refused
-        or could not be reached; nothing was stored), `needs_inspection` (an external write may have happened; never
-        retried automatically).
+        Terminal: `completed` (a decision exists; a refused payout also ends here; an approved case completes once
+        its payout is submitted, with `payout.state: submitted` until the background confirmation), `failed` (the
+        backend refused or could not be reached and nothing was stored, or `intake_not_confirmed`: the intake payment
+        failed on chain), `needs_inspection` (an external write may have happened, the intake was not confirmed in
+        time, or a background payout confirmation failed; never retried automatically).
       enum: [accepted, initial_check, investigating, deciding, payout, completed, failed, needs_inspection]
     Band:
       type: string
@@ -559,7 +672,7 @@ components:
     CaseView:
       type: object
       description: Public case view (`caseView` in `main/orchestrate.mjs`). No raw invoice data, no addresses, no report prose.
-      required: [case_id, status, created_at, updated_at, check_id, band, risk_score, investigators, decision, payout, inspection]
+      required: [case_id, status, created_at, updated_at, check_id, intake, band, risk_score, investigators, decision, payout, inspection]
       additionalProperties: false
       properties:
         case_id:
@@ -577,6 +690,11 @@ components:
           type: [string, 'null']
           description: Backend check ID (`chk_<ULID>`) once the initial check is done.
           examples: [chk_01JBX7ZQ8V3K6M2N4P5R7S9T0W]
+        intake:
+          description: The customer's intake payment. `null` only for a case journal without intake data.
+          oneOf:
+            - type: 'null'
+            - $ref: '#/components/schemas/CaseIntake'
         band:
           oneOf:
             - $ref: '#/components/schemas/Band'
@@ -617,11 +735,40 @@ components:
                 code:
                   type: string
                   description: |
-                    Stop code from `main/orchestrate.mjs`, for example `initial_check_unknown`, `xml_missing`,
+                    Stop code from `main/orchestrate.mjs`, for example `intake_not_confirmed` (`failed`: the intake
+                    payment failed on chain, no money moved), `intake_unconfirmed` (`needs_inspection`: the intake was
+                    not confirmed in time, no money moved), `initial_check_unknown`, `xml_missing`,
                     `initial_check_unreachable`, `initial_check_refused:<code>`, `sokosumi_create_unknown`,
                     `sokosumi_create_attempts_exhausted`, `investigator_payment_unknown`, `decision_unknown`,
                     `decision_not_recorded[:<code>]`, `payout_unknown`, `payout_<code>`, `internal_error`.
                   examples: [initial_check_unknown]
+    CaseIntake:
+      type: object
+      description: |
+        The customer's x402 intake payment. `202` is sent at `submitted`; Main confirms the transaction in the
+        background. No money moves for the case (investigators, supplier payout) before `state` is `confirmed`.
+      required: [tx_hash, state, paid_at, confirmed_at]
+      properties:
+        tx_hash:
+          type: [string, 'null']
+          description: Cardano transaction ID of the intake payment (the 202's `payment_tx_hash`).
+          pattern: '^[0-9a-f]{64}$'
+        state:
+          type: string
+          description: |
+            `submitted`: verified and submitted, not yet confirmed. `confirmed`: on chain. `failed`: it can no longer
+            confirm (the case is then `failed` with `intake_not_confirmed` unless it already completed without moving
+            money). A wait that timed out keeps `submitted` and stops the case as `needs_inspection`
+            (`intake_unconfirmed`). A case journaled before this field existed reads `confirmed`.
+          enum: [submitted, confirmed, failed]
+        paid_at:
+          type: [string, 'null']
+          format: date-time
+          description: When Main accepted the submitted payment (ISO 8601 with milliseconds).
+        confirmed_at:
+          type: [string, 'null']
+          format: date-time
+          description: When Main saw the intake confirmed; `null` until then.
     InvestigatorView:
       type: object
       required: [sokosumi_task_id, payment, payment_tx_hash, report, verdict]
@@ -690,11 +837,15 @@ components:
         phase:
           type: string
           description: |
-            `started` (running or interrupted), `done` (`payout/transfer.mjs` returned), `refused` (the backend
-            policy answered 409, no intent, nothing signed; spec §12.4), `error` (stopped; see `inspection`).
-          enum: [started, done, refused, error]
+            `started` (running or interrupted), `submitted` (the payout transaction is submitted and the case is
+            `completed`; Main confirms it in the background), `done` (`payout/transfer.mjs` returned or the background
+            confirmation saw it confirmed), `refused` (the backend policy answered 409, no intent, nothing signed;
+            spec §12.4), `error` (stopped; see `inspection`).
+          enum: [started, submitted, done, refused, error]
         state:
-          description: Backend payout intent state (spec §12.5) when `phase` is `done`.
+          description: |
+            Backend payout intent state (spec §12.5) when `phase` is `submitted`, `done` or `error`. A `completed`
+            case may show `submitted`; it later becomes `confirmed`.
           type: [string, 'null']
           enum: [authorized, submitting, submitted, confirmed, failed, unknown, null]
         payout_id:
@@ -831,11 +982,13 @@ components:
           description: Present only when `success` is false.
         extra:
           type: object
-          description: Facilitator evidence; the gate requires `status = confirmed` and `confirmations >= l1Confirmations`.
+          description: |
+            Settlement evidence. With `acceptOn: 'submitted'` (Main's intake) the 202 may carry `status: submitted`;
+            a confirmation-only gate requires `status = confirmed` and `confirmations >= l1Confirmations`.
           properties:
             status:
               type: string
-              examples: [confirmed]
+              examples: [submitted, confirmed]
             confirmations:
               type: integer
           additionalProperties: true
