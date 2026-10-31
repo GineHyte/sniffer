@@ -1,8 +1,8 @@
 # Sniffer MVP: Progress Journal
 
 Read this first when resuming. The full plan is in `docs/plans/2026-10-30-sniffer-mvp.md` (decision log §0 and agent-assignment table).
-Last update: 2026-10-31. Branch: `feat/mvp`, 23 commits ahead of `main`, working tree clean.
-Overall: **about 55%.** The Rust Initial Check is complete. The agent orchestration, payments and live setup are not done yet.
+Last update: 2026-10-31. Branch: `feat/mvp`, 30 commits ahead of `main`, working tree clean.
+Overall: **about 70%.** The Rust backend (Initial Check, payouts, supplier history), the x402 gate and payer, and the payout transfer are done; a live x402 payment is measured. The agent orchestration (T25, T26), live provisioning and E2E are not done yet.
 
 ## Working rules (from the user)
 - Split work into small tasks. Give each task to one project agent (see `.claude/agents/AGENTS.md`). Only one agent edits a given file at a time.
@@ -14,7 +14,7 @@ Overall: **about 55%.** The Rust Initial Check is complete. The agent orchestrat
 ## Decisions (all confirmed, details in plan §0)
 - **Payments:** agent-service payments use **x402**, for both flows: customer → Sniffer intake, and Main → each investigator.
 - **Sokosumi + x402:** one Sokosumi task per investigator. The investigator's `POST /pay/{taskId}` is behind an x402 gate.
-- **Supplier payout:** a minimal Preprod ADA transfer (Mesh SDK) with a server signer and no UI. EUR→ADA uses a fixed rate `ADA_PER_EUR`.
+- **Supplier payout:** a minimal Preprod ADA transfer with a server signer and no UI. EUR→ADA uses a fixed rate `ADA_PER_EUR`. **SDK: `@evolution-sdk/evolution` 0.5.19 (already pinned), not Mesh** (user decision 2026-10-31; no new deps).
 - **Main decision:** an LLM decides per `promts/main_agent_prompt.txt`. Code guardrails override it:
   - A missing report or INSUFFICIENT_DATA → `rejected`/`formal`.
   - A CRITICAL report or DONT_PAY → `rejected`/`risk`.
@@ -32,19 +32,16 @@ Overall: **about 55%.** The Rust Initial Check is complete. The agent orchestrat
 | T21 | x402 spike: conditional GO (`docs/x402-notes.md`). |
 | T23 | `agents/report-schema.mjs`: zod schemas for the reports, plus `parseModelJson`. |
 | T24 | One Eve process per role (`AGENT_ROLE` = invoice, wallet, supplier or main). `client.mjs` `answerReport()` validates the reply, allows 1 repair, then fails closed. |
-| x402 phase A | `@x402/cardano`, `core`, `fetch` @2.28.0 and `@evolution-sdk/evolution` @0.5.19 are pinned. `x402/wallets.mjs`, `facilitator.mjs`, `live-test.mjs`. `npm test` passes 62/62. |
+| x402 phase A | `@x402/cardano`, `core`, `fetch` @2.28.0 and `@evolution-sdk/evolution` @0.5.19 are pinned. `x402/wallets.mjs`, `facilitator.mjs`, `live-test.mjs`. |
+| x402 phase B | Live Preprod payment confirmed: tx `7feeb885…b07b` (d9bce8f). x402 is a full GO. |
+| T19 (9310f98) | Payout policy engine, `0002_payouts.sql`, state machine, Blockfrost `/txs/{hash}/utxos` confirm, `unknown` job (started in `jobs::spawn_all`). Reason codes incl. spec-only `amount_zero`, `payouts_disabled`. `payouts_it` 18/18. |
+| T20 (fc29dc0) | `GET /v1/suppliers/{supplier_hash}/history`. `history_it` 2/2 (H1). |
+| T22 (39416de) | `x402/gate.mjs` (confirmed settle only, unique `txHash → resource` journal) and `x402/pay.mjs` (`payOnce`, journals before signing, `pending`/`unknown` → "inspect"). `resourceId` may be a function of `req`. Journals assume one process per file. |
+| T27 (0624459) | `payout/transfer.mjs` (Evolution SDK). Never resubmits. `.local/payout.env` format: `PAYOUT_MNEMONIC="<24 words>"` + optional `PAYOUT_ACCOUNT_INDEX` (T28 creates it). The local journal claim does not stop two machines from paying one intent. |
+| Tests now | `cargo test`: lib 298, acceptance 32 (+2 ignored), cli_it 1, decisions_it 7, history_it 2, payouts_it 18, store_it 2. Clippy and fmt clean. `npm test` 100/100. |
 
-## Next: wave 6 (prepared; it was about to launch when the context was reset)
-Route slots are already wired: `backend/src/payouts.rs` and `backend/src/history.rs` each expose `routes() -> Router<AppState>`. `api.rs` merges both. `api::authorize` and `ApiError::new` are `pub(crate)`. Databases `sniffer_t19` and `sniffer_t20` exist.
-
-| Task | Owner agent | Files | Notes |
-|---|---|---|---|
-| T19 payout policy | general-purpose | `backend/src/payouts.rs`, `backend/migrations/0002_payouts.sql`, `backend/tests/payouts_it.rs` | Spec §12.2–12.5, 12.7–12.9 (P1–P10). Rules 1–8, idempotent on `invoice_hash`, advisory lock for the daily cap, state machine, Blockfrost `/txs/{hash}/utxos` confirm, `unknown` job. Uses DB `sniffer_t19`, Redis index 10. |
-| T20 supplier history | general-purpose | `backend/src/history.rs`, `backend/tests/history_it.rs` | Spec §12.6 and H1. DB `sniffer_t20`, Redis index 9. |
-| T22 x402 wrapper | worker-integrator | `x402/gate.mjs`, `x402/pay.mjs` and tests | Must keep a unique `txHash → taskId` journal (replay protection), and grant access only after a confirmed settle. `/pay` only records. Payments are sequential per wallet. `payOnce` journals before signing; an `unknown` state is never retried. |
-| T27 payout module | general-purpose | `payout/*` (+ Mesh SDK in package.json, exact pin, ≥ 2 weeks old) | Flow: authorize → submitting → submit → submitted → confirm. Key in `.local/payout.env`; the key is never logged. |
-
-After wave 6:
+## Next: wave 7
+Wave 6 (T19, T20, T22, T27) is done and committed.
 - **T25:** investigator API and worker gate. Also verify that 2+ Eve role processes run in parallel; if not, give each role its own app root under `.local/eve-<role>/`. Fix `worker.mjs` `execFileSync('sokosumi')` on Windows: run the CLI's JS entry with `process.execPath`, never `shell: true` with task IDs.
 - **T26:** Main orchestrator with `decide.mjs` guardrails.
 - **T28:** live provisioning (asks the user at each step).
@@ -52,7 +49,7 @@ After wave 6:
 - **T30:** test-verifier, safety-reviewer, README rewrite.
 
 ## Open items / blockers
-1. **x402 phase B (live payment) is waiting on the user:**
+1. **x402 phase B DONE (2026-10-31):** tx `7feeb885ff97026405b497045fb1a38cb2f820eb057dbbeae9855c406754b07b`, 1 tADA payer → payee, confirmed; recorded in `docs/x402-notes.md` (commit d9bce8f). The payer had 100 tADA before the payment. The original steps, kept for reference:
    - Fund the payer `addr_test1qqp5a9cwecr7yh9arg8hu4c28v40jsrr44qpqgq690suhp5e6fwja63vqpj23ygdd6tawcw6r25lk7aulyyfeue4exsqjdtqf8` from the Preprod faucet.
    - Check the balance: `node --env-file=.env x402/wallets.mjs balance payer`.
    - Run: `node --env-file=.env x402/live-test.mjs --confirm-live-payment`.
