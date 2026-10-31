@@ -199,6 +199,9 @@ npm run customer -- --confirm-live-payments          # pays INTAKE_PRICE_LOVELAC
 cd frontend && npm ci && npm run dev                 # http://localhost:3000
 ```
 
+Production build of the UI (same gateway, same port): `cd frontend && npm run build && npm start`.
+Check the mode before uploading: `curl http://127.0.0.1:21952/api/config` must show `"mode":"live"` for a paid run.
+
 Drop one or more `.xml` files, check the preview, then click "prüfen". The queue pays one invoice at a time. When Main
 answers `503 too_many_unconfirmed_intakes`, the queue pauses for 20 s and retries the same invoice. Each case is
 polled every 2 s until its payout is confirmed or it stops. Submitted cases survive a reload, and every case has a
@@ -222,6 +225,41 @@ Types in `frontend/lib/generated/` come from `docs/openapi/customer-api.yaml`: `
 - An intake that fails on chain ends the case as `failed` (`intake_not_confirmed`).
 - An intake not confirmed within `INTAKE_CONFIRM_TIMEOUT_MS` (default 10 min) stops the case as `needs_inspection` (`intake_unconfirmed`).
 - At most `MAX_UNCONFIRMED_INTAKES` (default 5) intakes may be unconfirmed at once. Beyond that, `POST /v1/invoices` answers `503` before any payment is taken.
+
+**Exposure limit.** `new_wallet_limit_eur` in `backend/config/criteria.json` equals `max_invoice_eur` (10000 EUR), so I-2 fires only above 10000 EUR, also for a new wallet. Lower it to bring back the separate new-wallet limit; `npm run stack` applies the change.
+
+### 8. Start over (upload the same invoice again)
+
+A case ID is a hash of the XML, and the backend rejects an exact duplicate (KO-3). To submit the same invoice again,
+stop Main, the gateway, the investigator APIs and the workers, then archive the local state and clear the backend's case tables.
+The sanctions list stays. This also resets supplier and wallet history and the daily payout cap.
+
+```sh
+A=.local/archive/$(date +%Y%m%d-%H%M%S); mkdir -p $A/payout-state
+mv .local/main .local/demo $A/ 2>/dev/null
+for r in invoice wallet supplier; do mkdir -p $A/inv-$r; mv .local/investigator-$r/tasks .local/investigator-$r/gate-journal.json $A/inv-$r/ 2>/dev/null; rm -f .local/investigator-$r/*.lock; done
+mv payout/state/*.json $A/payout-state/ 2>/dev/null
+docker exec sniffer-postgres-1 sh -c 'pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB" --data-only -t checks -t invoices -t payout_intents -t subjects' > $A/backend-data.sql
+echo 'TRUNCATE checks, invoices, payout_intents, subjects RESTART IDENTITY CASCADE;' \
+  | docker exec -i sniffer-postgres-1 sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -q'
+docker exec sniffer-redis-1 redis-cli flushdb
+```
+
+Then start the services again (step 5) and run `npm run preflight`; it should report "fresh case". On Git Bash for
+Windows, prefix the `docker exec` lines with `MSYS_NO_PATHCONV=1`.
+
+### Windows notes
+
+- **Sokosumi login.** The Sokosumi CLI 1.0.4 opens the login page with `cmd start`, which cuts the URL at the first `&`; the browser then shows "invalid_request: response_type is required". Log in through the preload in this repo, which opens the full URL:
+
+  ```sh
+  node --import ./scripts/sokosumi-login-win.mjs "$(npm root -g)/@masumi_network/sokosumi/dist/bin/sokosumi.js" --preprod auth login
+  ```
+
+  An unfinished login keeps port 53682 busy (`EADDRINUSE`); stop that `sokosumi ... auth login` process first.
+- **Runtime keys** live in the OS vault of each machine. On a new machine import them again (step 4); otherwise the workers fail with `No runtime key is stored for this Coworker`, and Main pays investigators whose tasks never start.
+- `npm run preflight` reports `investigator workers: ps failed` on Windows because it uses `ps`. Check the worker logs for `worker running` instead.
+- In Git Bash, Windows options like `taskkill /PID` need doubled slashes (`taskkill //PID 123 //F`).
 
 ## Tests
 
