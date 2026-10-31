@@ -1,7 +1,7 @@
 // Read-only preflight for one paid end-to-end Sniffer case on Cardano Preprod (T29).
 // Prints a PASS/FAIL/WARN table and exits 1 if a required check fails. Writes nothing, pays nothing,
 // creates no Sokosumi resources. Env values are never printed: only presence and comparisons.
-//   npm run preflight [-- --fixture docs/fixtures/f1.xml --invoice-number RE-2026-0413 --recipient-wallet payee]
+//   npm run preflight [-- --fixture docs/fixtures/f1.xml --invoice-number RE-2026-0413 --recipient-wallet payee --new-supplier]
 import {execFile} from 'node:child_process';
 import {existsSync,readFileSync} from 'node:fs';
 import {join,resolve} from 'node:path';
@@ -9,7 +9,8 @@ import {pathToFileURL} from 'node:url';
 import {promisify} from 'node:util';
 import {intakeIds} from '../main/case-store.mjs';
 import {INVESTIGATOR_ROLES} from '../investigator/contract.mjs';
-import {ROOT,parseArgs,prepareXml,duePayableCents,payoutLovelace,payKeyFor,PAYER_MARGIN_LOVELACE} from './demo-case.mjs';
+import {ROOT,parseArgs,prepareXml,duePayableCents,payoutLovelace,payKeyFor,PAYER_MARGIN_LOVELACE,
+ resolveSupplier,supplierLines,supplierLookups,sellerVat,normalizeVat,readRepoJson,VIES_MOCK_FILE} from './demo-case.mjs';
 
 const execFileAsync=promisify(execFile);
 export const FEE_MARGIN_LOVELACE=2_000_000n; // fees + min-UTxO change per wallet (payOnce payer, payout/transfer.mjs preflight)
@@ -45,6 +46,16 @@ export function formatTable(rows){
 }
 
 export const requiredFailed=rows=>rows.some(row=>row.required&&row.status==='FAIL');
+
+/** Row for the submitted seller's history: a fresh supplier fires S-9 and keeps f1 at medium (investigators). */
+export function supplierFreshRow(vat,history,{viesValid=true}={}){
+ const name='fixture: supplier fresh (S-9)';
+ if(!vat)return {name,ok:false,warn:true,detail:'no seller VAT ID (BT-31) in the fixture'};
+ const vies=viesValid?'':`; ${vat} is not valid in ${VIES_MOCK_FILE}: S-2 (+35) fires with VIES_MODE=mock`;
+ if(history?.status===404)return {name,ok:viesValid,warn:true,detail:`${vat} has no invoice in the backend: S-9 fires, expect medium (investigators)${vies}`};
+ if(history?.status===200)return {name,ok:false,warn:true,detail:`${vat} already has invoices (approved_count ${history.body?.approved_count??'?'}): S-9 does not fire, f1 scores 15 -> low -> auto-approved without investigators. For a medium case add --new-supplier${vies}`};
+ return {name,ok:false,warn:true,detail:`supplier history of ${vat} unknown (${history?.error??`HTTP ${history?.status||'none'}`})${vies}`};
+}
 
 /** Running investigator workers by role, from `ps -eo command` output. */
 export function workersRunning(psOutput){
@@ -98,10 +109,25 @@ export async function runChecks(argv,env=process.env){
  let xml=null;let payout=null;
  try{
   const {walletAddress}=await import('../x402/wallets.mjs');
-  xml=prepareXml(readFileSync(resolve(ROOT,options.fixture),'utf8'),{invoiceNumber:options.invoiceNumber,recipientAddress:options.recipientWallet?walletAddress(options.recipientWallet):null});
+  const raw=readFileSync(resolve(ROOT,options.fixture),'utf8');
+  const base={invoiceNumber:options.invoiceNumber,recipientAddress:options.recipientWallet?walletAddress(options.recipientWallet):null};
+  const xmlFor=rewrite=>prepareXml(raw,{...base,...rewrite});
+  const lookups=supplierLookups(env,{mainUrl:options.mainUrl,journalDir:env.DEMO_STATE_DIR?.trim()||join(ROOT,'.local','demo')});
+  let supplier=null;
+  try{supplier=await resolveSupplier(options,{xmlFor,lookups});if(supplier)add('fixture: supplier rewrite',true,supplierLines(supplier).join('; '));}
+  catch(error){add('fixture: supplier rewrite',false,error.message);}
+  xml=xmlFor(supplier?.rewrite??{});
   payout=payoutLovelace(duePayableCents(xml),env.ADA_PER_EUR);
   const {caseId}=intakeIds(xml);
-  add('fixture',true,`${options.fixture}${options.invoiceNumber?` as ${options.invoiceNumber}`:''} -> ${caseId}`,{required:false});
+  add('fixture',true,`${options.fixture}${options.invoiceNumber?` as ${options.invoiceNumber}`:''}${supplier?.vat?` from ${supplier.vat}`:''} -> ${caseId}`,{required:false});
+  if(!supplier?.vat){
+   const vat=sellerVat(xml);
+   let history=null;
+   try{history=vat?await lookups.history(vat):null;}catch(error){history={status:0,error:error.message.split('.')[0]};}
+   let viesValid=true;try{viesValid=readRepoJson(VIES_MOCK_FILE)[normalizeVat(vat??'')]===true;}catch{}
+   const row=supplierFreshRow(vat,history,{viesValid});
+   add(row.name,row.ok,row.detail,{required:false,warn:row.warn});
+  }
   add('fixture: payout >= min UTxO',payout!==null&&payout>=MIN_UTXO_LOVELACE,payout===null?'DuePayableAmount or ADA_PER_EUR unreadable':`${formatAda(payout)} tADA at ADA_PER_EUR (approved cases only)`);
   const caseFile=join(env.MAIN_STATE_DIR?.trim()||join(ROOT,'.local','main'),'cases',caseId,'case.json');
   const payFile=join(env.DEMO_STATE_DIR?.trim()||join(ROOT,'.local','demo'),`pay-${payKeyFor(caseId)}.json`);

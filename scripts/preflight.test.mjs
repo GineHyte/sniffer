@@ -1,6 +1,6 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {minimums,formatTable,requiredFailed,workersRunning,formatAda,REQUIRED_ENV} from './preflight.mjs';
+import {minimums,formatTable,requiredFailed,workersRunning,formatAda,supplierFreshRow,REQUIRED_ENV} from './preflight.mjs';
 
 test('per-case minimums: intake + 2 tADA, 3 investigator payments + 2 tADA, payout + 2 tADA',()=>{
  assert.deepEqual(minimums({intakePrice:'1000000',investigatorPrice:'1000000',payout:1_190_000n}),{payer:3_000_000n,mainPayer:5_000_000n,payout:3_190_000n});
@@ -28,4 +28,16 @@ test('worker detection matches only the role worker processes',()=>{
 test('required env covers every Main startup variable',()=>{
  for(const name of ['COWORKER_ID_INVOICE','INVESTIGATOR_SUPPLIER_URL','INVESTIGATOR_WALLET_PAY_TO','INTAKE_PRICE_LOVELACE','INTAKE_PAY_TO','INVESTIGATOR_PRICE_LOVELACE','BLOCKFROST_API_KEY_PREPROD','SNIFFER_API_TOKEN'])
   assert.ok(REQUIRED_ENV.includes(name),name);
+});
+
+test('supplier freshness row: S-9 fires only for a supplier without backend invoices',()=>{
+ const fresh=supplierFreshRow('DE111111111',{status:404});
+ assert.equal(fresh.ok,true);assert.match(fresh.detail,/S-9 fires, expect medium/);
+ const used=supplierFreshRow('DE111111111',{status:200,body:{approved_count:1}});
+ assert.equal(used.ok,false);assert.equal(used.warn,true);assert.match(used.detail,/approved_count 1\): S-9 does not fire.*--new-supplier/);
+ assert.match(supplierFreshRow('DE111111111',{status:0,error:'missing key'}).detail,/unknown \(missing key\)/);
+ assert.match(supplierFreshRow('DE111111111',null).detail,/unknown \(HTTP none\)/);
+ const invalid=supplierFreshRow('DE444444444',{status:404},{viesValid:false});
+ assert.equal(invalid.ok,false);assert.match(invalid.detail,/S-2 \(\+35\)/);
+ assert.match(supplierFreshRow(null,null).detail,/no seller VAT/);
 });

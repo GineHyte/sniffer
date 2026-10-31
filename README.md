@@ -184,6 +184,7 @@ This runs one invoice through the whole pipeline: x402 intake payment, Initial C
    ```
 
    Running it again with the same invoice only resumes polling. For a new case, pass `--invoice-number <new number>`. Use `npm run demo -- --case <case_id>` to follow an existing case without paying.
+   A second invoice from the same supplier loses S-9 (first invoice), scores low and is auto-approved without investigators. Add `--new-supplier` to swap the seller (VAT BT-31, name BT-27, open order BT-13) for the first VAT that `backend/data/vies-mock.json` marks valid and the backend has no invoice for. It reads `GET /v1/suppliers/{supplier_hash}/history` with `SNIFFER_HMAC_KEY` and `SNIFFER_API_TOKEN`. Without them, pass `--supplier-vat <VAT>` (and optionally `--supplier-name <name>`). `npm run preflight` reports whether the submitted supplier is still fresh.
 
 ## Check your changes
 
