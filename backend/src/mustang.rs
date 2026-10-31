@@ -282,7 +282,11 @@ impl DaemonSlot {
         .await;
 
         match ready {
-            Ok(Some(())) => Some(Self { stdin, stdout, _child: child }),
+            Ok(Some(())) => Some(Self {
+                stdin,
+                stdout,
+                _child: child,
+            }),
             _ => {
                 tracing::warn!("mustang daemon: process did not send READY in time");
                 None
@@ -399,14 +403,13 @@ impl Mustang {
             }
             MustangMode::Daemon => {
                 let timeout = Duration::from_millis(self.settings.timeout_ms);
-                let permit =
-                    match tokio::time::timeout(timeout, self.semaphore.acquire()).await {
-                        Ok(Ok(p)) => p,
-                        _ => {
-                            tracing::warn!("mustang daemon: semaphore acquire timed out");
-                            return Validation::unavailable_result();
-                        }
-                    };
+                let permit = match tokio::time::timeout(timeout, self.semaphore.acquire()).await {
+                    Ok(Ok(p)) => p,
+                    _ => {
+                        tracing::warn!("mustang daemon: semaphore acquire timed out");
+                        return Validation::unavailable_result();
+                    }
+                };
 
                 let xml_stripped = xml.strip_prefix('\u{feff}').unwrap_or(xml);
                 let path = match write_temp(xml_stripped) {
@@ -427,8 +430,7 @@ impl Mustang {
 
                 match result {
                     Some((ref stdout, code)) => {
-                        let validation =
-                            evaluate_report(stdout, code, &self.settings.whitelist);
+                        let validation = evaluate_report(stdout, code, &self.settings.whitelist);
                         self.pool.lock().await.push(slot);
                         drop(permit);
                         validation
