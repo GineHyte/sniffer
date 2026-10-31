@@ -47,8 +47,13 @@ Done (local only, no network writes):
 - `.local/payout.env`: fresh payout mnemonic. Payout address `addr_test1qpn7t2trak0rlsush4237ysa4yuu48265r9m5fug8jkup0z0929498cxn7fstduw8s53wzy5awsl03t6vqzrf500l89qr44l92`.
 - Wallets in `.local/x402/`: `main-payer` `addr_test1qpaj66hl86xrt258lmxsf403nh04q76fs9s3tssr78h7qjkqzpn22xxu94p0zqcp9tw986p8neruzual0lp33n5vnwhsedn75p`, `intake` `addr_test1qzpdqn7hv5wdyfw76ay7c5vu92xad6d2s0sw4ggpcgdm2qn9jnsryv05ec04fclqtsh3rnhdetpysf2pmtgmqvnpxwpsv5h8sk`, `inv-invoice`, `inv-wallet`, `inv-supplier` (addresses in `.local/live.env`). The x402 `payer` wallet (~99 tADA) acts as the test customer.
 - `.local/live.env`: non-secret settings (addresses, prices 1 tADA, `ADA_PER_EUR=0.001`, caps 10/50 ADA, ports, Eve URLs). npm scripts and compose load it (063ee2c); `npm run stack` starts the compose stack with all env files.
-Waiting on the user: `sokosumi --preprod auth login`; `AGENT_AUTHOR` and `ZAI_API_KEY`/`ZAI_BASE_URL`/`ZAI_MODEL` in `.env`; faucet funds for `main-payer` and the payout wallet.
-Then (each step asks first): discover account/org/Vendor → Vendor (create only if none) → 3 Coworkers → connect to the org (needs GRANTED) → per-Coworker runtime key (`coworkers api-key` + `runtime key-import`, OS vault) → write IDs into `.local/live.env`.
+Done 2026-10-31 (moved to macOS; state copied into `.local/`):
+- **Model:** ZAI replaced by the Claude API. `agent/agent.ts` uses `@ai-sdk/anthropic` 4.0.71 (pinned, same `@ai-sdk/provider` as `ai@7.0.127`). Env: `ANTHROPIC_API_KEY` (required), `ANTHROPIC_MODEL` (default `claude-opus-5-5`), `MODEL_CONTEXT_WINDOW_TOKENS` (default 1000000, so Eve skips its catalog lookup). Live smoke reply from the invoice Eve measured.
+- **Sokosumi** (account `o.petrenko@skfx.io`): Vendor `Sniffer` `01a19000-ecef-721f-8991-2dd0e9fc7140`; Coworkers invoice `01a19001-22c9-72b4-9d9b-60da266bcd3f`, wallet `01a19001-269b-744c-9f16-1ee6c7e5b0e6`, supplier `01a19001-2b0b-77fc-a5f4-315fd8e5b010`. TUM-Hackathon access PENDING (admin approval); **Celeris** (`celeris-diigps`, owner) GRANTED and active in `.local/live.env`. Runtime keys imported into the macOS Keychain. CLI responses in `.local/sokosumi/`.
+- Unpaid smoke task `01a19014-b357-76ee-b607-7ce5f1d42b9b` in Celeris: the invoice worker logged "Skipping unpaid task" (measured).
+- **Bug found live:** Sokosumi prepends `[DESIGN.md](https://…)\n\n` to task descriptions in a Workspace with a design doc. `stripDescriptionPrefix` in `investigator/contract.mjs` now strips only that pattern; Main's `findCreatedTask` uses it too.
+- Compose maps `BLOCKFROST_PROJECT_ID` from `BLOCKFROST_API_KEY_PREPROD`. Backend `/health` ok.
+Still open: faucet funds for `main-payer` and the payout wallet; OFAC SDN download returns HTTP 403 (sanctions list empty); first paid E2E run (T29).
 
 ## Wave 7 (DONE 2026-10-31; pushed to origin/main). Next: T28 live provisioning, T29 E2E demo, T30 verify/review/README.
 Wave 6 (T19, T20, T22, T27) is done and committed.
@@ -88,13 +93,14 @@ T26 decisions (user, 2026-10-31):
    - Record the tx hash in `docs/x402-notes.md`.
    - Payee: `addr_test1qqsukwn3txs33kx4qh97g5suejsc6w78x994j7y6sefsk29vnt2urqy4t5rmhddtmprmhpfuueuupmd7kaez7ganq3xs5usuqq`.
    - The mnemonics are only in `.local/x402/`.
-2. **`.env`** now exists, created by the user. Never read it. It lacks `POSTGRES_PASSWORD`, so `docker compose` fails to interpolate. Until the user adds it, prefix commands with `POSTGRES_PASSWORD=throwaway-test` (the running containers use that password).
+2. **`.env`** exists, created by the user. Never read it. Its `COWORKER_ID`/`SOKOSUMI_ORGANIZATION_*` values are stale (not this account); `.local/live.env` overrides the org settings. Run compose through `npm run stack` (it loads `.local/sniffer-secrets.env`, which holds `POSTGRES_PASSWORD`).
 3. **`npm audit`** went from 3 to 6 findings. The 3 new high ones are the zod <4.6.6 advisory via `@x402/core`. The fix is `@x402/*` 2.29.0, which is too new (< 2 weeks). Revisit before public deploy and update the README count.
 4. `model::DecidedBy` has no `Seed` variant. Harmless today because seed rows are `low` and are never decided again.
 5. Minor spec choices made by agents are listed in their reports. Examples: I-2 shows `new_wallet_limit_eur` when both branches hold. KO with missing BT-5 writes no invoices row (`currency NOT NULL`). Revisit if tests demand.
 
 ## Environment facts
-- Windows 11:
+- Since 2026-10-31: macOS, Node 25.5, Docker 29.3, cargo 1.94 (no host Java; Mustang runs inside the image). Sokosumi CLI 1.0.4 installed globally.
+- Before that, Windows 11:
   - Node 24.22.2 (nvm).
   - Rust 1.99.1 (`backend/rust-toolchain.toml`).
   - Java 17.
