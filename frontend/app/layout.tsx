@@ -10,26 +10,27 @@ const body = Inter({ subsets: ["latin"], variable: "--font-body", display: "swap
 const display = Pixelify_Sans({ subsets: ["latin"], variable: "--font-display", display: "swap" });
 
 export const metadata: Metadata = {
-  title: "Invoice Scam Sniffer",
-  description: "E-Rechnungen mit Cardano-Zahlungsadresse prüfen lassen, bezahlt per x402 auf Cardano Preprod.",
+  title: "Sniffer",
+  description: "Check e-invoices with a Cardano payment address, paid via x402 on Cardano Preprod.",
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="de" className={`${body.variable} ${display.variable}`}>
-      <body className="min-h-screen">
+    <html lang="en" className={`${body.variable} ${display.variable}`}>
+      <body className="flex min-h-screen flex-col">
         <Providers>
           <header className="border-b border-line bg-surface/80 backdrop-blur">
             <div className="mx-auto flex max-w-5xl flex-wrap items-center justify-between gap-3 px-4 py-3">
               <Link href="/" className="flex items-center gap-2.5">
                 <Mascot play="baby_01_walk" scale={1} />
-                <span className="font-pixel text-lg leading-none tracking-wide">Invoice Scam Sniffer</span>
+                <span className="font-pixel text-lg leading-none tracking-wide">Sniffer</span>
               </Link>
               <GatewayStatus />
             </div>
           </header>
-          <main className="mx-auto max-w-5xl px-4 py-8 sm:py-10">{children}</main>
-          <footer className="mx-auto max-w-5xl px-4 pb-8 text-xs text-ink-3">Cardano Preprod · Masumi · x402 — TUM Blockchain &amp; AI Hackathon 2026</footer>
+          <main className="mx-auto w-full max-w-5xl flex-1 px-4 py-8 sm:py-10">{children}</main>
+          <footer className="mx-auto w-full max-w-5xl px-4 pb-4 text-xs text-ink-3">Cardano Preprod · Masumi · x402 — TUM Blockchain &amp; AI Hackathon 2026</footer>
+          <div aria-hidden className="ground h-9 w-full" />
         </Providers>
       </body>
     </html>

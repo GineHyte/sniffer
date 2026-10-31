@@ -48,7 +48,8 @@ export type Action =
   | { type: "failed"; key: string; error: string }
   | { type: "retry"; key: string }
   | { type: "wake"; now: number }
-  | { type: "clearDone" };
+  | { type: "clearDone" }
+  | { type: "clearAll" };
 
 export const initialQueue: QueueState = { items: [], pausedUntil: 0 };
 
@@ -69,7 +70,7 @@ export function queueReducer(state: QueueState, action: Action): QueueState {
       const seen = new Set(state.items.filter((item) => item.phase !== "invalid").map((item) => item.caseId));
       const added = action.items.map((item) => {
         if (item.phase === "invalid" || !item.caseId) return item;
-        if (seen.has(item.caseId)) return { ...item, phase: "duplicate" as const, xml: null, error: "Gleiche Rechnung ist schon in der Liste." };
+        if (seen.has(item.caseId)) return { ...item, phase: "duplicate" as const, xml: null, error: "This invoice is already in the list." };
         seen.add(item.caseId);
         return item;
       });
@@ -100,6 +101,8 @@ export function queueReducer(state: QueueState, action: Action): QueueState {
       return { ...state, items: state.items.map((item) => (item.phase === "waiting" ? { ...item, phase: "queued" } : item)) };
     case "clearDone":
       return { ...state, items: state.items.filter((item) => item.phase !== "invalid" && item.phase !== "duplicate") };
+    case "clearAll": // keeps only a payment that is already running, so no paid invoice loses its row mid-flight
+      return { ...state, items: state.items.filter((item) => item.phase === "paying" || item.phase === "waiting") };
   }
 }
 

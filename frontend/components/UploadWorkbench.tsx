@@ -6,20 +6,34 @@ import { caseIdFor, checkFile, formatAda, shortHash } from "@/lib/einvoice";
 import { previewOf } from "@/lib/preview";
 import { countBy, initialQueue, nextToPay, persistable, queueReducer, restorable, type Item } from "@/lib/queue";
 import { CaseBody, OutcomeBadge, useCase } from "./CaseDetail";
+import type { Prop } from "./GroundDecor";
 import { Ground, Mascot } from "./Mascot";
 import { Badge, Button, Card, useGatewayConfig, type BadgeTone } from "./ui";
 
 // Pause after Main refused new intakes (503 too_many_unconfirmed_intakes): Preprod confirmations take ~20–60 s.
 const STORAGE_KEY = "sniffer.queue.v1";
 const RETRY_MS = { live: 20_000, mock: 2_000 } as const;
+// Props on the hero grass, bunched around the sniffer (right edge) and sparse to the left, so the strip never looks tiled.
+const HERO_DECOR: Prop[] = [
+  { sprite: "poppy", left: "4%" },
+  { sprite: "pebble", left: "15%" },
+  { sprite: "mossRock", left: "27%" },
+  { sprite: "daisy", left: "41%", flip: true },
+  { sprite: "mushroom", left: "54%" },
+  { sprite: "daisy", left: "61%" },
+  { sprite: "bush", left: "66%" },
+  { sprite: "poppy", left: "71%", flip: true },
+  { sprite: "rock", left: "74%" },
+  { sprite: "pebble", left: "79%" },
+];
 
 const ERROR_TEXT: Record<string, string> = {
-  gateway_unreachable: "Gateway nicht erreichbar (npm run customer läuft?).",
-  payer_balance_too_low: "Demo-Wallet hat zu wenig tADA.",
-  not_an_einvoice: "Keine E-Rechnung erkannt.",
-  xml_too_large: "XML zu groß.",
-  payment_failed: "Zahlung gestoppt – Journal unter .local/demo prüfen.",
-  main_unavailable: "Sniffer (Main API) antwortet nicht.",
+  gateway_unreachable: "Gateway unreachable (is npm run customer running?).",
+  payer_balance_too_low: "Demo wallet has too little tADA.",
+  not_an_einvoice: "No e-invoice detected.",
+  xml_too_large: "XML too large.",
+  payment_failed: "Payment stopped – check the journal in .local/demo.",
+  main_unavailable: "Sniffer (Main API) is not responding.",
 };
 
 
@@ -99,17 +113,17 @@ export function UploadWorkbench() {
     <div className="space-y-8">
       <div>
         <div className="flex flex-wrap items-end justify-between gap-x-8 gap-y-2">
-          <div className="max-w-xl pb-4">
+          <div className="max-w-xl pb-10">
             <p className="text-xs font-medium uppercase tracking-[0.18em] text-brand">Agentic Commerce on Cardano</p>
-            <h1 className="mt-2 font-pixel text-3xl leading-tight sm:text-4xl">E-Rechnungen prüfen</h1>
+            <h1 className="mt-2 font-pixel text-3xl leading-tight sm:text-4xl">Check e-invoices</h1>
             <p className="mt-3 text-[15px] leading-relaxed text-ink-2">
-              XRechnung- oder ZUGFeRD-XML mit Cardano-Zahlungsadresse hochladen. Jede Rechnung wird einzeln per x402 bezahlt und vom Sniffer geprüft:
-              Erstprüfung, bei mittlerem Risiko drei Agenten, danach Freigabe und Auszahlung oder eine begründete Ablehnung.
+              Upload XRechnung or ZUGFeRD XML with a Cardano payment address. Each invoice is paid for individually via x402 and checked by the Sniffer:
+              an initial check, three agents for medium risk, then approval and payout or a reasoned rejection.
             </p>
           </div>
-          <Mascot play={dragging ? "baby_03b_glasses_bounce" : "baby_03c_glasses_idle"} scale={4} onGround className="ml-auto" label="Sniffer" />
+          <Mascot play={dragging ? "baby_03b_glasses_bounce" : "baby_03c_glasses_idle"} scale={4} onGround className="relative z-10 ml-auto" label="Sniffer" />
         </div>
-        <Ground />
+        <Ground decor={HERO_DECOR} decorCell={4} />
       </div>
 
       <div
@@ -134,8 +148,8 @@ export function UploadWorkbench() {
         <svg aria-hidden viewBox="0 0 24 24" className="mb-3 h-8 w-8 text-brand transition-transform group-hover:-translate-y-0.5" fill="none" stroke="currentColor" strokeWidth="1.6">
           <path d="M12 16V4m0 0-4 4m4-4 4 4M4 16v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2" strokeLinecap="round" strokeLinejoin="round" />
         </svg>
-        <p className="font-medium">XML-Dateien hierher ziehen oder klicken</p>
-        <p className="mt-1 text-xs text-ink-3">Mehrere Dateien möglich · max. {Math.floor((config?.max_xml_bytes ?? 500_000) / 1000)} kB je Datei · nur .xml</p>
+        <p className="font-medium">Drag XML files here or click</p>
+        <p className="mt-1 text-xs text-ink-3">Multiple files allowed · max. {Math.floor((config?.max_xml_bytes ?? 500_000) / 1000)} kB per file · .xml only</p>
         <input
           ref={input}
           type="file"
@@ -153,39 +167,42 @@ export function UploadWorkbench() {
         <Card className="rise overflow-hidden">
           <div className="flex flex-wrap items-center justify-between gap-3 border-b border-line px-4 py-3">
             <div className="text-sm">
-              <span className="font-medium">{queue.items.length} Datei{queue.items.length === 1 ? "" : "en"}</span>
+              <span className="font-medium">{queue.items.length} file{queue.items.length === 1 ? "" : "s"}</span>
               {paused && (
                 <span className="ml-2 text-warn">
-                  Sniffer wartet auf Bestätigung früherer Zahlungen – nächster Versuch in {Math.ceil((queue.pausedUntil - now) / 1000)} s
+                  Sniffer is waiting for earlier payments to confirm – next try in {Math.ceil((queue.pausedUntil - now) / 1000)} s
                 </span>
               )}
-              {!paused && open > 0 && <span className="ml-2 text-ink-2">{open} in der Warteschlange</span>}
+              {!paused && open > 0 && <span className="ml-2 text-ink-2">{open} in queue</span>}
             </div>
             <div className="flex flex-wrap gap-2">
               {countBy(queue, "invalid", "duplicate") > 0 && (
                 <Button variant="ghost" onClick={() => dispatch({ type: "clearDone" })}>
-                  Ungültige entfernen
+                  Remove invalid
                 </Button>
               )}
+              <Button variant="ghost" onClick={() => dispatch({ type: "clearAll" })}>
+                Clear list
+              </Button>
               <Button disabled={!ready || !config || (!config.main_ok && config.mode === "live")} onClick={() => dispatch({ type: "start" })}>
-                {ready ? `${ready} prüfen · ${formatAda(price * BigInt(ready))} tADA` : "Prüfen"}
+                {ready ? `Check ${ready} · ${formatAda(price * BigInt(ready))} tADA` : "Check"}
               </Button>
             </div>
           </div>
           {ready > 0 && config && (
             <p className="border-b border-line bg-surface-2 px-4 py-2 text-xs text-ink-2">
               {config.mode === "mock"
-                ? "Mock-Modus: es wird nichts bezahlt."
-                : `Mit „prüfen“ zahlt die Demo-Wallet „${config.wallet}“ je neuer Rechnung ${formatAda(price)} tADA auf Cardano Preprod. Schon bezahlte Rechnungen werden nicht erneut bezahlt.`}
+                ? "Mock mode: nothing is paid."
+                : `“Check” makes the demo wallet “${config.wallet}” pay ${formatAda(price)} tADA per new invoice on Cardano Preprod. Invoices already paid for are not paid again.`}
             </p>
           )}
           {open > 0 && (
             <div className="border-b border-line bg-surface-2/50 px-4 pt-3">
               <div className="flex items-end gap-4">
-                <Mascot play={paused ? "baby_00_idle" : "baby_01_walk"} scale={2} onGround />
-                <p className="pb-3 font-pixel text-sm text-ink-2">{paused ? "Kurze Pause …" : "Der Sniffer schnüffelt …"}</p>
+                <Mascot play={paused ? "baby_00_idle" : "baby_01_walk"} scale={2} onGround className="relative z-10" />
+                <p className="pb-6 font-pixel text-sm text-ink-2">{paused ? "Short break …" : "The Sniffer is sniffing …"}</p>
               </div>
-              <Ground className="h-1.5" />
+              <Ground height={24} />
             </div>
           )}
           <ul className="divide-y divide-line">
@@ -200,14 +217,14 @@ export function UploadWorkbench() {
 }
 
 const PHASE: Record<Item["phase"], { tone: BadgeTone; label: string }> = {
-  invalid: { tone: "bad", label: "Ungültig" },
-  duplicate: { tone: "neutral", label: "Doppelt" },
-  ready: { tone: "neutral", label: "Bereit" },
-  queued: { tone: "info", label: "Wartet" },
-  paying: { tone: "info", label: "Zahlung läuft" },
-  waiting: { tone: "warn", label: "Pausiert" },
-  submitted: { tone: "info", label: "Eingereicht" },
-  failed: { tone: "bad", label: "Fehler" },
+  invalid: { tone: "bad", label: "Invalid" },
+  duplicate: { tone: "neutral", label: "Duplicate" },
+  ready: { tone: "neutral", label: "Ready" },
+  queued: { tone: "info", label: "Queued" },
+  paying: { tone: "info", label: "Paying" },
+  waiting: { tone: "warn", label: "Paused" },
+  submitted: { tone: "info", label: "Submitted" },
+  failed: { tone: "bad", label: "Error" },
 };
 
 function QueueRow({ item, mock, onRemove, onRetry }: { item: Item; mock: boolean; onRemove: () => void; onRetry: () => void }) {
@@ -222,7 +239,7 @@ function QueueRow({ item, mock, onRemove, onRetry }: { item: Item; mock: boolean
             <span className="truncate text-sm font-medium" title={item.fileName}>
               {item.fileName}
             </span>
-            {item.existing && <Badge>bereits bezahlt</Badge>}
+            {item.existing && <Badge>already paid</Badge>}
           </div>
           {p ? (
             <div className="mt-0.5 flex flex-wrap gap-x-3 text-xs text-ink-2">
@@ -249,17 +266,17 @@ function QueueRow({ item, mock, onRemove, onRetry }: { item: Item; mock: boolean
           {data?.case.risk_score != null && <span className="tabular w-10 text-right font-pixel text-base">{data.case.risk_score}</span>}
           {item.phase === "failed" && (
             <Button variant="ghost" onClick={onRetry}>
-              Erneut
+              Retry
             </Button>
           )}
           {["invalid", "duplicate", "ready", "queued", "failed"].includes(item.phase) && (
-            <button onClick={onRemove} className="rounded p-1 text-ink-3 hover:bg-surface-2 hover:text-ink" aria-label="Entfernen">
+            <button onClick={onRemove} className="rounded p-1 text-ink-3 hover:bg-surface-2 hover:text-ink" aria-label="Remove">
               ✕
             </button>
           )}
           {data && (
             <Button variant="ghost" onClick={() => setOpen(!open)} aria-expanded={open}>
-              {open ? "Weniger" : "Details"}
+              {open ? "Less" : "Details"}
             </Button>
           )}
         </div>

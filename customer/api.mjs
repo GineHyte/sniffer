@@ -34,7 +34,7 @@ const positiveInt=(env,name,fallback)=>{
 
 /** Reads the gateway configuration. Never reads secrets: the mnemonic and the backend token are loaded by their own modules. */
 export function loadConfig(env=process.env,{mock=false}={}){
- const price=env.INTAKE_PRICE_LOVELACE?.trim()||(mock?'2000000':'');
+ const price=env.INTAKE_PRICE_LOVELACE?.trim()||(mock?'1000000':'');
  if(!LOVELACE_RE.test(price))throw new Error('INTAKE_PRICE_LOVELACE is not set. Run with: npm run customer (loads .local/live.env).');
  return {
   mode:mock?'mock':'live',

@@ -16,15 +16,15 @@ const checkIdFor=caseId=>`chk_${caseId.slice(5,31).toUpperCase()}`;
 export const scenarioFor=caseId=>['low','medium','high'][parseInt(caseId[11],16)%3];
 
 const CRITERIA={
- low:{score:5,criteria:[{id:'I-7',name:'Zahlungsziel kürzer als üblich',points:5,evidence:'Fälligkeit 7 Tage nach Rechnungsdatum (Historie: 30 Tage)',agent:'invoice'}],
-  reducers:[{id:'T-1',name:'Lieferant mit genehmigter Historie',points:-10,evidence:'3 genehmigte Rechnungen an dieselbe Wallet'}],decision:'approve'},
+ low:{score:5,criteria:[{id:'I-7',name:'Payment term shorter than usual',points:5,evidence:'Due 7 days after the invoice date (history: 30 days)',agent:'invoice'}],
+  reducers:[{id:'T-1',name:'Supplier with approved history',points:-10,evidence:'3 approved invoices to the same wallet'}],decision:'approve'},
  medium:{score:42,criteria:[
-  {id:'S-9',name:'Neuer Lieferant',points:12,evidence:'Keine frühere Rechnung zu dieser USt-ID',agent:'research'},
-  {id:'W-3',name:'Junge Wallet',points:15,evidence:'Erste Transaktion vor 4 Tagen (Blockfrost)',agent:'wallet'},
-  {id:'I-4',name:'Betrag knapp unter Freigabegrenze',points:15,evidence:'9.950,00 EUR bei Grenze 10.000,00 EUR',agent:'invoice'}],reducers:[],decision:'review'},
+  {id:'S-9',name:'New supplier',points:12,evidence:'No earlier invoice for this VAT ID',agent:'research'},
+  {id:'W-3',name:'Young wallet',points:15,evidence:'First transaction 4 days ago (Blockfrost)',agent:'wallet'},
+  {id:'I-4',name:'Amount just below approval limit',points:15,evidence:'9,950.00 EUR with a 10,000.00 EUR limit',agent:'invoice'}],reducers:[],decision:'review'},
  high:{score:100,criteria:[
-  {id:'KO-2',name:'Zahlungsadresse ungültig',points:100,evidence:'BT-84 ist keine Preprod-Adresse',agent:'wallet'},
-  {id:'S-2',name:'USt-ID ungültig',points:35,evidence:'VIES: DE999999999 nicht gültig',agent:'research'}],reducers:[],decision:'decline'},
+  {id:'KO-2',name:'Payment address invalid',points:100,evidence:'BT-84 is not a Preprod address',agent:'wallet'},
+  {id:'S-2',name:'VAT ID invalid',points:35,evidence:'VIES: DE999999999 not valid',agent:'research'}],reducers:[],decision:'decline'},
 };
 
 function investigators(caseId,age){

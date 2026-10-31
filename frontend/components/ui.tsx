@@ -37,7 +37,7 @@ export function Button({
 
 export function TxLink({ hash, mock }: { hash: string | null | undefined; mock?: boolean }) {
   if (!hash) return <span className="text-ink-3">–</span>;
-  if (mock) return <span className="font-mono text-xs text-ink-3" title="Mock: nicht on-chain">{shortHash(hash, 6)}</span>;
+  if (mock) return <span className="font-mono text-xs text-ink-3" title="Mock: not on-chain">{shortHash(hash, 6)}</span>;
   return (
     <a href={`${EXPLORER_TX}${hash}`} target="_blank" rel="noreferrer" className="font-mono text-xs text-brand hover:underline" title={hash}>
       {shortHash(hash, 6)} ↗

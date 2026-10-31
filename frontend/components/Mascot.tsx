@@ -1,5 +1,9 @@
 // Pixel sniffer. Each clip in public/web is a self-looping animated WebP at native 47x35,
-// scaled up crisp by CSS. public/web/still holds the first frame for reduced-motion users.
+// scaled up crisp by CSS. public/web/still holds one frame per clip for reduced-motion users:
+// the first frame, except mood clips use their most telling frame (baby_02_sit #10 smiling,
+// baby_04_sad #11, baby_04b_sad_stand #6 and baby_04c_sad_lying #5 crying) so the mood reads without motion.
+import { GroundDecor, type Prop } from "./GroundDecor";
+
 export const ANIMATIONS = [
   "baby_00_idle",
   "baby_01_walk",
@@ -50,7 +54,18 @@ export function Mascot({ play, scale = 2, flip = false, onGround = false, classN
   );
 }
 
-/** Thin grass-on-dirt strip the crab stands on. */
-export function Ground({ className = "" }: { className?: string }) {
-  return <div aria-hidden className={`ground h-2 w-full ${className}`} />;
+// Grass tile is 12 cells tall with a 2-cell base; the blades above the base rise behind the content above.
+const GRASS_H = 12;
+const GRASS_BASE = 2;
+
+/** Pixel grass strip the sniffer stands on. Give the sniffer `relative z-10` so it stays in front of the blades. */
+/** `decorCell` is the pixel size of the props; match the sniffer scale so they read as one world. */
+export function Ground({ height = 36, decor, decorCell, className = "" }: { height?: number; decor?: Prop[]; decorCell?: number; className?: string }) {
+  const cell = height / GRASS_H;
+  const base = cell * GRASS_BASE;
+  return (
+    <div aria-hidden className={`ground relative w-full ${className}`} style={{ height, marginTop: -(height - base) }}>
+      {decor && <GroundDecor items={decor} cell={decorCell ?? cell} base={base} />}
+    </div>
+  );
 }

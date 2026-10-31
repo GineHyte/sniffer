@@ -9,13 +9,13 @@ import { Badge, TxLink, useGatewayConfig, type BadgeTone } from "./ui";
 
 const TONE: Record<Tone, BadgeTone> = { pending: "info", approved: "ok", rejected: "bad", attention: "warn" };
 const BAND_TONE: Record<string, BadgeTone> = { low: "ok", medium: "warn", high: "bad" };
-const ROLE_LABEL: Record<string, string> = { invoice: "Invoice-Agent", wallet: "Wallet-Agent", supplier: "Lieferanten-Agent" };
+const ROLE_LABEL: Record<string, string> = { invoice: "Invoice agent", wallet: "Wallet agent", supplier: "Supplier agent" };
 const VERDICT_TONE: Record<string, BadgeTone> = { CLEAR: "ok", CONCERN: "warn", CRITICAL: "bad", INSUFFICIENT_DATA: "neutral" };
 const AGENT_LABEL: Record<string, string> = { invoice: "Invoice", wallet: "Wallet", research: "Research" };
 const REACTION: Record<Tone, Animation> = {
   pending: "baby_03_glasses",
-  approved: "baby_03b_glasses_bounce",
-  rejected: "baby_04_sad",
+  approved: "baby_02_sit",
+  rejected: "baby_04c_sad_lying",
   attention: "baby_04b_sad_stand",
 };
 
@@ -37,7 +37,7 @@ export function useCase(caseId: string | null) {
 }
 
 export function OutcomeBadge({ data }: { data: CaseWithCheck | undefined }) {
-  if (!data) return <Badge>Lade …</Badge>;
+  if (!data) return <Badge>Loading …</Badge>;
   const { tone, label } = outcome(data.case);
   return (
     <Badge tone={TONE[tone]}>
@@ -63,7 +63,7 @@ function Stepper({ data }: { data: CaseWithCheck }) {
           <span className={`h-2.5 w-2.5 shrink-0 rounded-[2px] border-2 ${DOT[step.state]}`} />
           <span className={step.state === "pending" || step.state === "skipped" ? "text-ink-3" : "text-ink"}>
             {step.label}
-            {step.state === "skipped" && <span className="text-ink-3"> · entfällt</span>}
+            {step.state === "skipped" && <span className="text-ink-3"> · skipped</span>}
           </span>
         </li>
       ))}
@@ -106,7 +106,7 @@ function CriteriaTable({ title, rows }: { title: string; rows: FiredCriterion[] 
             <div className="min-w-0">
               <div className="font-medium">{row.name}</div>
               <div className="break-words text-xs text-ink-2">{row.evidence}</div>
-              {row.agent && <div className="mt-1 text-[11px] text-ink-3">→ {AGENT_LABEL[row.agent] ?? row.agent}-Agent</div>}
+              {row.agent && <div className="mt-1 text-[11px] text-ink-3">→ {AGENT_LABEL[row.agent] ?? row.agent} agent</div>}
             </div>
             <span className={`tabular text-sm font-semibold ${row.points < 0 ? "text-ok" : "text-ink"}`}>
               {row.points > 0 ? "+" : ""}
@@ -124,13 +124,13 @@ function Investigator({ role, view, mock }: { role: string; view: InvestigatorVi
     <div className="rounded-lg border border-line bg-surface p-3 text-sm">
       <div className="mb-2 flex items-center justify-between gap-2">
         <span className="font-medium">{ROLE_LABEL[role] ?? role}</span>
-        {view.verdict ? <Badge tone={VERDICT_TONE[view.verdict]}>{view.verdict}</Badge> : <Badge tone="info">läuft</Badge>}
+        {view.verdict ? <Badge tone={VERDICT_TONE[view.verdict]}>{view.verdict}</Badge> : <Badge tone="info">running</Badge>}
       </div>
       <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-xs">
-        <dt className="text-ink-3">Zahlung</dt>
+        <dt className="text-ink-3">Payment</dt>
         <dd>{view.payment ?? "–"}</dd>
         <dt className="text-ink-3">Report</dt>
-        <dd>{view.report ?? "ausstehend"}</dd>
+        <dd>{view.report ?? "pending"}</dd>
         <dt className="text-ink-3">Tx</dt>
         <dd>
           <TxLink hash={view.payment_tx_hash} mock={mock} />
@@ -152,24 +152,24 @@ export function CaseBody({ data, mock }: { data: CaseWithCheck; mock: boolean })
         <Mascot play={mood(view)} scale={3} />
         <Score score={check?.risk_score ?? view.risk_score} band={check?.band ?? view.band} />
         <dl className="grid flex-1 grid-cols-[auto_1fr] gap-x-4 gap-y-1.5 text-sm">
-          <dt className="text-ink-3">Prüfgebühr</dt>
+          <dt className="text-ink-3">Check fee</dt>
           <dd>
             <TxLink hash={view.intake?.tx_hash} mock={mock} /> <span className="text-xs text-ink-3">({view.intake?.state ?? "–"})</span>
           </dd>
-          <dt className="text-ink-3">Entscheidung</dt>
+          <dt className="text-ink-3">Decision</dt>
           <dd>
-            {view.decision ? `${view.decision.decision} · ${view.decision.decided_by === "agents" ? "nach Agenten-Review" : "Erstprüfung"}` : "ausstehend"}
+            {view.decision ? `${view.decision.decision} · ${view.decision.decided_by === "agents" ? "after agent review" : "initial check"}` : "pending"}
           </dd>
-          <dt className="text-ink-3">Auszahlung</dt>
+          <dt className="text-ink-3">Payout</dt>
           <dd>
             {view.payout ? (
               <>
                 <TxLink hash={view.payout.tx_hash} mock={mock} /> <span className="text-xs text-ink-3">({view.payout.state ?? view.payout.phase})</span>
               </>
             ) : view.decision?.final_decision === "rejected" ? (
-              "keine"
+              "none"
             ) : (
-              "ausstehend"
+              "pending"
             )}
           </dd>
         </dl>
@@ -177,14 +177,14 @@ export function CaseBody({ data, mock }: { data: CaseWithCheck; mock: boolean })
 
       {view.inspection && (
         <div className="rounded-lg bg-warn-bg px-3 py-2 text-sm text-warn">
-          Gestoppt: <span className="font-mono text-xs">{view.inspection.code}</span>
+          Stopped: <span className="font-mono text-xs">{view.inspection.code}</span>
           {INSPECTION_HINT[view.inspection.code] ? ` – ${INSPECTION_HINT[view.inspection.code]}` : ""}
         </div>
       )}
 
       {reasons.length > 0 && (
         <div className="rounded-lg border border-bad/30 bg-bad-bg p-3">
-          <h4 className="mb-1.5 text-sm font-semibold text-bad">Gründe für „Nicht bezahlen“</h4>
+          <h4 className="mb-1.5 text-sm font-semibold text-bad">Reasons for “Don’t pay”</h4>
           <ul className="space-y-1 text-sm">
             {reasons.map((reason) => (
               <li key={reason.id}>
@@ -200,7 +200,7 @@ export function CaseBody({ data, mock }: { data: CaseWithCheck; mock: boolean })
         <div className="space-y-4">
           {check.checks_incomplete.length > 0 && (
             <div className="flex flex-wrap items-center gap-1.5 text-xs text-ink-2">
-              Unvollständig geprüft:
+              Not fully checked:
               {check.checks_incomplete.map((code) => (
                 <Badge key={code} tone="warn">
                   {code}
@@ -208,16 +208,16 @@ export function CaseBody({ data, mock }: { data: CaseWithCheck; mock: boolean })
               ))}
             </div>
           )}
-          <CriteriaTable title={`Gefeuerte Kriterien (${check.criteria.length})`} rows={check.criteria} />
-          <CriteriaTable title="Entlastende Faktoren" rows={check.reducers} />
-          {check.criteria.length === 0 && check.reducers.length === 0 && <p className="text-sm text-ink-2">Keine Kriterien gefeuert.</p>}
+          <CriteriaTable title={`Triggered criteria (${check.criteria.length})`} rows={check.criteria} />
+          <CriteriaTable title="Mitigating factors" rows={check.reducers} />
+          {check.criteria.length === 0 && check.reducers.length === 0 && <p className="text-sm text-ink-2">No criteria triggered.</p>}
         </div>
       )}
-      {data.check_error && <p className="text-xs text-warn">Kriterien gerade nicht abrufbar ({data.check_error}).</p>}
+      {data.check_error && <p className="text-xs text-warn">Criteria unavailable right now ({data.check_error}).</p>}
 
       {view.investigators && (
         <div>
-          <h4 className="mb-2 font-pixel text-sm text-ink-2">Agenten-Review (bezahlt per x402)</h4>
+          <h4 className="mb-2 font-pixel text-sm text-ink-2">Agent review (paid via x402)</h4>
           <div className="grid gap-2 sm:grid-cols-3">
             {(["invoice", "wallet", "supplier"] as const).map((role) => (
               <Investigator key={role} role={role} view={view.investigators![role]} mock={mock} />
@@ -227,7 +227,7 @@ export function CaseBody({ data, mock }: { data: CaseWithCheck; mock: boolean })
       )}
 
       <p className="text-xs text-ink-3">
-        Fall{" "}
+        Case{" "}
         <Link href={`/cases/${view.case_id}`} className="font-mono hover:underline">
           {view.case_id}
         </Link>
@@ -240,12 +240,12 @@ export function CaseBody({ data, mock }: { data: CaseWithCheck; mock: boolean })
 export function CaseDetail({ caseId }: { caseId: string }) {
   const { data, error, isLoading } = useCase(caseId);
   const config = useGatewayConfig().data;
-  if (isLoading) return <p className="text-sm text-ink-2">Lade Fall …</p>;
-  if (error || !data) return <p className="text-sm text-bad">Fall nicht gefunden oder Gateway nicht erreichbar.</p>;
+  if (isLoading) return <p className="text-sm text-ink-2">Loading case …</p>;
+  if (error || !data) return <p className="text-sm text-bad">Case not found or gateway unreachable.</p>;
   return (
     <div className="space-y-4">
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <h1 className="font-pixel text-2xl">Prüffall</h1>
+        <h1 className="font-pixel text-2xl">Case</h1>
         <OutcomeBadge data={data} />
       </div>
       <div className="rounded-xl border border-line bg-surface p-4 sm:p-5">

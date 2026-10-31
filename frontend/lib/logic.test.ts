@@ -42,10 +42,10 @@ test("checkFile refuses wrong names, sizes, encodings and non-invoices", () => {
   assert.equal(looksLikeEInvoice('<?xml version="1.0"?><ubl:Invoice xmlns:ubl="x"/>'), true);
 });
 
-test("formatAda uses a decimal comma and drops trailing zeros", () => {
+test("formatAda uses a decimal point and drops trailing zeros", () => {
   assert.equal(formatAda("2000000"), "2");
-  assert.equal(formatAda("2500000"), "2,5");
-  assert.equal(formatAda(1n), "0,000001");
+  assert.equal(formatAda("2500000"), "2.5");
+  assert.equal(formatAda(1n), "0.000001");
 });
 
 test("queue marks a second copy of the same XML as duplicate", () => {
@@ -92,7 +92,7 @@ test("steps and outcome follow a medium case to its confirmed payout", () => {
   assert.equal(steps(submitted)[5].state, "active");
   const done = { ...submitted, payout: { ...submitted.payout!, phase: "done" as const, state: "confirmed" as const } };
   assert.equal(isSettled(done), true);
-  assert.deepEqual(outcome(done), { tone: "approved", label: "Freigegeben · ausgezahlt" });
+  assert.deepEqual(outcome(done), { tone: "approved", label: "Approved · paid out" });
 });
 
 test("a high-band rejection skips review and payout; an inspection stop marks the stuck step", () => {

@@ -24,25 +24,25 @@ export type FileCheck = { ok: true; xml: string } | { ok: false; error: string }
 
 /** Decodes and checks one file's bytes. Errors are customer-facing German text. */
 export function checkFile(name: string, bytes: Uint8Array, maxXmlBytes: number): FileCheck {
-  if (!/\.xml$/i.test(name)) return { ok: false, error: "Nur XML-Dateien (XRechnung / ZUGFeRD-XML)." };
-  if (bytes.byteLength > maxXmlBytes) return { ok: false, error: `Datei größer als ${Math.floor(maxXmlBytes / 1000)} kB.` };
+  if (!/\.xml$/i.test(name)) return { ok: false, error: "XML files only (XRechnung / ZUGFeRD XML)." };
+  if (bytes.byteLength > maxXmlBytes) return { ok: false, error: `File is larger than ${Math.floor(maxXmlBytes / 1000)} kB.` };
   let xml: string;
   try {
     xml = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
   } catch {
-    return { ok: false, error: "Datei ist nicht UTF-8-kodiert." };
+    return { ok: false, error: "File is not UTF-8 encoded." };
   }
-  if (!xml.trim()) return { ok: false, error: "Datei ist leer." };
-  if (!looksLikeEInvoice(xml)) return { ok: false, error: "Keine E-Rechnung (CII oder UBL) erkannt." };
+  if (!xml.trim()) return { ok: false, error: "File is empty." };
+  if (!looksLikeEInvoice(xml)) return { ok: false, error: "No e-invoice (CII or UBL) detected." };
   return { ok: true, xml };
 }
 
-/** "2000000" lovelace → "2" / "2,5" tADA (German decimal comma, no trailing zeros). */
+/** "2000000" lovelace → "2" / "2.5" tADA (decimal point, no trailing zeros). */
 export function formatAda(lovelace: string | bigint): string {
   const value = BigInt(lovelace);
   const whole = value / 1_000_000n;
   const frac = (value % 1_000_000n).toString().padStart(6, "0").replace(/0+$/, "");
-  return frac ? `${whole},${frac}` : `${whole}`;
+  return frac ? `${whole}.${frac}` : `${whole}`;
 }
 
 export const shortHash = (hash: string, keep = 8) => (hash.length > keep * 2 + 1 ? `${hash.slice(0, keep)}…${hash.slice(-keep)}` : hash);

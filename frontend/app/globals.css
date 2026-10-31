@@ -21,8 +21,6 @@
   --bad: #a3302f;
   --bad-bg: #f6e0dc;
   --info-bg: #f6e4da;
-  --grass: #3c7a3f;
-  --dirt: #8a5a3b;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -44,8 +42,6 @@
     --bad: #ec7f73;
     --bad-bg: #3a1f1c;
     --info-bg: #3a2820;
-    --grass: #4f8f4f;
-    --dirt: #6b4630;
   }
 }
 
@@ -92,12 +88,11 @@ body {
   background-repeat: no-repeat;
 }
 
-/* One block of grass on a band of dirt, stepped like a voxel edge. */
+/* Pixel grass (public/web/grass.svg, 480x12 cells, seamless in x); blades stand on a 2-cell base. Heights in multiples of 12px stay crisp. */
 .ground {
-  background:
-    linear-gradient(var(--grass) 0 50%, transparent 50%),
-    repeating-linear-gradient(90deg, var(--dirt) 0 12px, color-mix(in srgb, var(--dirt) 82%, black) 12px 16px);
+  background: url("/web/grass.svg") repeat-x left bottom / auto 100%;
   image-rendering: pixelated;
+  pointer-events: none;
 }
 
 /* Chunky block button: hard drop shadow that collapses on press. */
