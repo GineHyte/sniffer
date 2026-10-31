@@ -9,6 +9,10 @@
     "start": "node --env-file-if-exists=.env start.mjs",
     "worker": "node --env-file-if-exists=.env worker.mjs",
     "api": "node --env-file-if-exists=.env --env-file-if-exists=.local/mps-runtime.env agent-api.mjs",
+    "investigator:eve": "node --env-file-if-exists=.env investigator/eve-root.mjs",
+    "investigator:api": "node --env-file-if-exists=.env investigator/api.mjs",
+    "investigator:worker": "node --env-file-if-exists=.env investigator/worker.mjs",
+    "main": "node --env-file-if-exists=.env main/api.mjs",
     "test": "node --env-file-if-exists=.env --test *.test.mjs agents/*.test.mjs x402/*.test.mjs payout/*.test.mjs investigator/*.test.mjs main/*.test.mjs"
   },
   "dependencies": {
