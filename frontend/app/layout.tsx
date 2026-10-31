@@ -22,7 +22,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
           <header className="border-b border-line bg-surface/80 backdrop-blur">
             <div className="mx-auto flex max-w-5xl flex-wrap items-center justify-between gap-3 px-4 py-3">
               <Link href="/" className="flex items-center gap-2.5">
-                <Mascot play={["01_walk"]} scale={0.5} pauseMs={2400} />
+                <Mascot play="baby_01_walk" scale={1} />
                 <span className="font-pixel text-lg leading-none tracking-wide">Invoice Scam Sniffer</span>
               </Link>
               <GatewayStatus />

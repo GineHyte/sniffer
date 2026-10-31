@@ -39,9 +39,6 @@ export function UploadWorkbench() {
   const [dragging, setDragging] = useState(false);
   const input = useRef<HTMLInputElement>(null);
   const mode = config?.mode ?? "live";
-  // crypto.subtle (case ID) exists only on localhost or HTTPS. On a server, open the UI through an SSH tunnel.
-  const [secure, setSecure] = useState(true);
-  useEffect(() => setSecure(window.isSecureContext && Boolean(globalThis.crypto?.subtle)), []);
 
   // Submitted cases survive a reload or a visit to a case page; storage may be unavailable (private mode).
   useEffect(() => {
@@ -87,10 +84,10 @@ export function UploadWorkbench() {
   const addFiles = useCallback(
     async (files: FileList | File[]) => {
       const list = Array.from(files);
-      if (!list.length || !secure) return;
+      if (!list.length) return;
       dispatch({ type: "add", items: await Promise.all(list.map((file) => toItem(file, config?.max_xml_bytes ?? 500_000))) });
     },
-    [config?.max_xml_bytes, secure],
+    [config?.max_xml_bytes],
   );
 
   const ready = countBy(queue, "ready");
@@ -110,22 +107,10 @@ export function UploadWorkbench() {
               Erstprüfung, bei mittlerem Risiko drei Agenten, danach Freigabe und Auszahlung oder eine begründete Ablehnung.
             </p>
           </div>
-          <Mascot
-            play={dragging ? ["04_happy_jump"] : ["02_sniff_glasses"]}
-            pauseMs={dragging ? 0 : 2500}
-            className="ml-auto -mb-px"
-            label="Sniffer-Krabbe"
-          />
+          <Mascot play={dragging ? "baby_03b_glasses_bounce" : "baby_03c_glasses_idle"} scale={4} onGround className="ml-auto" label="Sniffer" />
         </div>
         <Ground />
       </div>
-
-      {!secure && (
-        <div className="rounded-lg bg-bad-bg px-4 py-3 text-sm text-bad">
-          Upload gesperrt: Diese Seite ist über eine unverschlüsselte Adresse geöffnet. Bitte über <span className="font-mono">http://localhost:3000</span>{" "}
-          öffnen, auf einem Server per SSH-Tunnel: <span className="font-mono">ssh -L 3000:127.0.0.1:3000 &lt;server&gt;</span>
-        </div>
-      )}
 
       <div
         role="button"
@@ -197,7 +182,7 @@ export function UploadWorkbench() {
           {open > 0 && (
             <div className="border-b border-line bg-surface-2/50 px-4 pt-3">
               <div className="flex items-end gap-4">
-                <Mascot play={["03_sniff_trail"]} scale={1} className="-mb-px" />
+                <Mascot play={paused ? "baby_00_idle" : "baby_01_walk"} scale={2} onGround />
                 <p className="pb-3 font-pixel text-sm text-ink-2">{paused ? "Kurze Pause …" : "Der Sniffer schnüffelt …"}</p>
               </div>
               <Ground className="h-1.5" />

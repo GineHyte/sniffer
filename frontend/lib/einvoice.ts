@@ -1,6 +1,8 @@
 // Browser-side checks of an uploaded file before anything is paid. The backend still does every real check;
 // these only stop obvious mistakes (wrong file, too large, not UTF-8) and derive the case ID Main will use.
 
+import { sha256 } from "./sha256.ts";
+
 export const CASE_ID_RE = /^case-[0-9a-f]{32}$/;
 
 /** Same guard as customer/api.mjs looksLikeEInvoice: first element is a CII CrossIndustryInvoice or a UBL Invoice. */
@@ -11,8 +13,10 @@ export function looksLikeEInvoice(xml: string): boolean {
 
 /** Main's case ID: `case-` + first 32 hex chars of SHA-256 over the exact UTF-8 XML text (main/case-store.mjs intakeIds). */
 export async function caseIdFor(xml: string): Promise<string> {
-  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(xml));
-  const hex = Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+  const bytes = new TextEncoder().encode(xml);
+  // Browsers hide crypto.subtle on plain-HTTP addresses other than localhost; fall back to the JS digest there.
+  const digest = globalThis.crypto?.subtle ? new Uint8Array(await crypto.subtle.digest("SHA-256", bytes)) : sha256(bytes);
+  const hex = Array.from(digest, (byte) => byte.toString(16).padStart(2, "0")).join("");
   return `case-${hex.slice(0, 32)}`;
 }
 

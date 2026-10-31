@@ -1,71 +1,52 @@
-"use client";
+// Pixel sniffer. Each clip in public/web is a self-looping animated WebP at native 47x35,
+// scaled up crisp by CSS. public/web/still holds the first frame for reduced-motion users.
+export const ANIMATIONS = [
+  "baby_00_idle",
+  "baby_01_walk",
+  "baby_02_sit",
+  "baby_03_glasses",
+  "baby_03b_glasses_bounce",
+  "baby_03c_glasses_idle",
+  "baby_04_sad",
+  "baby_04b_sad_stand",
+  "baby_04c_sad_lying",
+  "baby_04d_sad_walk",
+] as const;
+export type Animation = (typeof ANIMATIONS)[number];
 
-import { useEffect, useState } from "react";
-import frames from "@/lib/mascot-frames.json";
-
-// Pixel crab. Sheets in public/mascot are grids (scripts repacked from one long strip); durations come per frame.
-export type Animation = keyof typeof frames;
-
-// Vertical window that holds the crab in every animation (frames are 128 px tall with empty sky above).
-const CROP = { y: 8, h: 80 };
+const W = 47;
+const H = 35;
+// Empty rows under the feet in every clip; pulled down so the sniffer stands on <Ground />.
+const FOOT_GAP = 2;
 
 type Props = {
-  /** Played in order; the last one loops. */
-  play: Animation[];
+  play: Animation;
+  /** Whole numbers keep pixels crisp. */
   scale?: number;
-  /** Rest on the last frame between loops. */
-  pauseMs?: number;
   flip?: boolean;
+  /** Sits on a <Ground /> strip: drops the empty rows under the feet. */
+  onGround?: boolean;
   className?: string;
   label?: string;
 };
 
-function reducedMotion() {
-  return typeof window !== "undefined" && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-}
-
-export function Mascot({ play, scale = 2, pauseMs = 0, flip = false, className = "", label }: Props) {
-  const key = play.join(",");
-  const [pos, setPos] = useState({ clip: 0, frame: 0 });
-
-  useEffect(() => setPos({ clip: 0, frame: 0 }), [key]);
-
-  useEffect(() => {
-    if (reducedMotion()) return;
-    const clip = play[pos.clip];
-    const meta = frames[clip];
-    const last = pos.frame === meta.durations.length - 1;
-    const looping = pos.clip === play.length - 1;
-    const wait = meta.durations[pos.frame] + (last && looping ? pauseMs : 0);
-    const timer = setTimeout(() => {
-      if (!last) setPos({ clip: pos.clip, frame: pos.frame + 1 });
-      else if (!looping) setPos({ clip: pos.clip + 1, frame: 0 });
-      else setPos({ clip: pos.clip, frame: 0 });
-    }, wait);
-    return () => clearTimeout(timer);
-  }, [pos, key, pauseMs]);
-
-  const clip = play[Math.min(pos.clip, play.length - 1)];
-  const meta = frames[clip];
-  const frame = Math.min(pos.frame, meta.durations.length - 1);
-  const rows = Math.ceil(meta.durations.length / meta.cols);
-  const col = frame % meta.cols;
-  const row = Math.floor(frame / meta.cols);
+export function Mascot({ play, scale = 2, flip = false, onGround = false, className = "", label }: Props) {
   return (
-    <div
-      role={label ? "img" : undefined}
-      aria-label={label}
-      aria-hidden={label ? undefined : true}
-      className={`pixelated shrink-0 ${className}`}
-      style={{
-        width: meta.w * scale,
-        height: CROP.h * scale,
-        backgroundImage: `url(/mascot/${clip}.png)`,
-        backgroundSize: `${meta.cols * meta.w * scale}px ${rows * meta.h * scale}px`,
-        backgroundPosition: `${-col * meta.w * scale}px ${-(row * meta.h + CROP.y) * scale}px`,
-        transform: flip ? "scaleX(-1)" : undefined,
-      }}
-    />
+    <picture
+      className={`block shrink-0 ${className}`}
+      style={{ marginBottom: onGround ? -FOOT_GAP * scale : undefined, transform: flip ? "scaleX(-1)" : undefined }}
+    >
+      <source srcSet={`/web/still/${play}.png`} media="(prefers-reduced-motion: reduce)" />
+      <img
+        src={`/web/${play}@1x.webp`}
+        width={W * scale}
+        height={H * scale}
+        alt={label ?? ""}
+        aria-hidden={label ? undefined : true}
+        draggable={false}
+        className="pixelated block"
+      />
+    </picture>
   );
 }
 

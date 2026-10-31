@@ -5,6 +5,7 @@ import { createHash } from "node:crypto";
 import { caseIdFor, checkFile, formatAda, looksLikeEInvoice } from "./einvoice.ts";
 import { initialQueue, nextToPay, persistable, queueReducer, restorable, type Item, type QueueState } from "./queue.ts";
 import { isSettled, outcome, steps } from "./progress.ts";
+import { sha256 } from "./sha256.ts";
 import type { CaseView } from "./api.ts";
 
 const XML = readFileSync(new URL("../../docs/fixtures/f1.xml", import.meta.url), "utf8");
@@ -21,6 +22,14 @@ const view = (patch: Partial<CaseView>): CaseView => ({
 
 test("caseIdFor matches Main's intakeIds (sha256 over the exact XML)", async () => {
   assert.equal(await caseIdFor(XML), `case-${createHash("sha256").update(XML, "utf8").digest("hex").slice(0, 32)}`);
+});
+
+test("JS sha256 fallback (plain-HTTP pages without crypto.subtle) matches node:crypto", () => {
+  // Lengths around the 55/56/64-byte padding edges, plus the real fixture with umlauts.
+  for (const text of ["", "abc", "a".repeat(55), "a".repeat(56), "a".repeat(64), "a".repeat(119), XML]) {
+    const bytes = new TextEncoder().encode(text);
+    assert.equal(Buffer.from(sha256(bytes)).toString("hex"), createHash("sha256").update(bytes).digest("hex"), `length ${bytes.length}`);
+  }
 });
 
 test("checkFile refuses wrong names, sizes, encodings and non-invoices", () => {

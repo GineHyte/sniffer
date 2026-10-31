@@ -12,11 +12,11 @@ const BAND_TONE: Record<string, BadgeTone> = { low: "ok", medium: "warn", high: 
 const ROLE_LABEL: Record<string, string> = { invoice: "Invoice-Agent", wallet: "Wallet-Agent", supplier: "Lieferanten-Agent" };
 const VERDICT_TONE: Record<string, BadgeTone> = { CLEAR: "ok", CONCERN: "warn", CRITICAL: "bad", INSUFFICIENT_DATA: "neutral" };
 const AGENT_LABEL: Record<string, string> = { invoice: "Invoice", wallet: "Wallet", research: "Research" };
-const REACTION: Record<Tone, { play: Animation[]; pauseMs: number }> = {
-  pending: { play: ["02_sniff_glasses"], pauseMs: 1500 },
-  approved: { play: ["04_happy_jump"], pauseMs: 1800 },
-  rejected: { play: ["05a_sad_lie_down", "05b_sad_lying_loop"], pauseMs: 0 },
-  attention: { play: ["05_sad_lying"], pauseMs: 3000 },
+const REACTION: Record<Tone, Animation> = {
+  pending: "baby_03_glasses",
+  approved: "baby_02_sit",
+  rejected: "baby_04_sad",
+  attention: "baby_04b_sad_stand",
 };
 
 /** Polls one case every 2 s until it is settled (payout confirmed or a final stop). */
@@ -142,7 +142,7 @@ export function CaseBody({ data, mock }: { data: CaseWithCheck; mock: boolean })
       <Stepper data={data} />
 
       <div className="flex flex-wrap items-start gap-6">
-        <Mascot play={REACTION[outcome(view).tone].play} pauseMs={REACTION[outcome(view).tone].pauseMs} scale={1} className="-my-2" />
+        <Mascot play={REACTION[outcome(view).tone]} scale={3} />
         <Score score={check?.risk_score ?? view.risk_score} band={check?.band ?? view.band} />
         <dl className="grid flex-1 grid-cols-[auto_1fr] gap-x-4 gap-y-1.5 text-sm">
           <dt className="text-ink-3">Prüfgebühr</dt>
