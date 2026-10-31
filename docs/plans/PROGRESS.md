@@ -53,7 +53,13 @@ Done 2026-10-31 (moved to macOS; state copied into `.local/`):
 - Unpaid smoke task `01a19014-b357-76ee-b607-7ce5f1d42b9b` in Celeris: the invoice worker logged "Skipping unpaid task" (measured).
 - **Bug found live:** Sokosumi prepends `[DESIGN.md](https://…)\n\n` to task descriptions in a Workspace with a design doc. `stripDescriptionPrefix` in `investigator/contract.mjs` now strips only that pattern; Main's `findCreatedTask` uses it too.
 - Compose maps `BLOCKFROST_PROJECT_ID` from `BLOCKFROST_API_KEY_PREPROD`. Backend `/health` ok.
-Still open: faucet funds for `main-payer` and the payout wallet; OFAC SDN download returns HTTP 403 (sanctions list empty); first paid E2E run (T29).
+- Also fixed 2026-10-31: OFAC download (User-Agent, fda9e5f); x402 UTxO reuse between sequential payments (6be1c28); VIES_MODE=mock for fixtures (in `.local/live.env`). Tooling: `npm run preflight`, `npm run demo` (`--new-supplier`, `--invoice-number`), OpenAPI specs in `docs/openapi/`. Latency: intake grants on submission, payouts report on submit (8d3c93b); no money moves before intake confirmation.
+- **T29 live E2E runs (Preprod, measured):**
+  - `case-7c525f29…` medium: stopped `needs_inspection` (`investigator_payment_unknown`) — the UTxO-reuse bug. Invoice investigator paid; wallet tx `95f10775…` can never land (input spent by `544864fc…`). Left parked for a human.
+  - `case-858cf9a0…` low (S-9 gone, score 15): approved by the initial check, payout confirmed (`4d9da357…`), ~57 s.
+  - `case-df1fe6fe…` low after the latency change: 202 at +3.9 s, payout submitted at +11.9 s, confirmed at +52 s.
+  - `case-eb1afa98…` medium (`--new-supplier`, score 55 incl. S-1): all 3 investigators paid sequentially, reports INSUFFICIENT_DATA/CONCERN/CONCERN → DONT_PAY/rejected (formal) at +3m17s.
+Still open: pass the matched open order to investigators so a first invoice can be approved (in progress); parallel investigator payments by splitting `main-payer` UTxOs (~1.5 min saving; user wants reminders); TUM-Hackathon Coworker access still PENDING.
 
 ## Wave 7 (DONE 2026-10-31; pushed to origin/main). Next: T28 live provisioning, T29 E2E demo, T30 verify/review/README.
 Wave 6 (T19, T20, T22, T27) is done and committed.
